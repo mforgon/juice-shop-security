@@ -100,7 +100,7 @@ jobs:
           docker run --rm \
             -v $(pwd)/src:/src \
             returntocorp/semgrep:latest \
-            semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json
+            semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json || { echo "Semgrep scan failed"; exit 1; }
 
       # Combine Reports
       - name: Combine Reports
