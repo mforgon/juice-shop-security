@@ -1,4 +1,4 @@
-name: Full Stack Security Scan
+name: Full Stack Security Scan with Combined Report
 
 on:
   push:
@@ -59,27 +59,37 @@ jobs:
             returntocorp/semgrep:latest \
             semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json
 
-      # Upload Reports
-      - name: Upload ZAP Report
-        uses: actions/upload-artifact@v3
-        with:
-          name: zap-security-report
-          path: zap_full_scan_report.html
+      # Combine all reports into a single report
+      - name: Combine Reports into One
+        run: |
+          echo "<html><head><title>Security Scan Report</title></head><body>" > combined_report.html
+          echo "<h1>Full Stack Security Scan Report</h1>" >> combined_report.html
 
-      - name: Upload Trivy Report
-        uses: actions/upload-artifact@v3
-        with:
-          name: trivy-security-report
-          path: trivy_report.html
+          # ZAP Report Section
+          echo "<h2>ZAP Security Scan Report</h2>" >> combined_report.html
+          cat zap_full_scan_report.html >> combined_report.html
 
-      - name: Upload SQLMap Report
-        uses: actions/upload-artifact@v3
-        with:
-          name: sqlmap-security-report
-          path: sqlmap_report
+          # Trivy Report Section
+          echo "<h2>Trivy Container Scan Report</h2>" >> combined_report.html
+          cat trivy_report.html >> combined_report.html
 
-      - name: Upload Semgrep Report
+          # SQLMap Report Section
+          echo "<h2>SQLMap Scan Report</h2>" >> combined_report.html
+          echo "<pre>" >> combined_report.html
+          cat sqlmap_report/* >> combined_report.html
+          echo "</pre>" >> combined_report.html
+
+          # Semgrep Report Section
+          echo "<h2>Semgrep Scan Report</h2>" >> combined_report.html
+          echo "<pre>" >> combined_report.html
+          cat semgrep_report.json >> combined_report.html
+          echo "</pre>" >> combined_report.html
+
+          echo "</body></html>" >> combined_report.html
+
+      # Upload Combined Report
+      - name: Upload Combined Report
         uses: actions/upload-artifact@v3
         with:
-          name: semgrep-security-report
-          path: semgrep_report.json
+          name: full-stack-security-report
+          path: combined_report.html
