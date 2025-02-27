@@ -44,8 +44,6 @@ jobs:
             -v $(pwd):/zap/wrk/:rw \
             zaproxy/zap-stable \
             zap-baseline.py -t http://localhost:3000 -r zap_report.html
-🔍 Explanation
-
       # Ensure ZAP Report Exists
       - name: Verify ZAP Report
         run: |
