@@ -97,12 +97,12 @@ jobs:
         run: |
           mkdir -p src  # Ensure src directory exists
 
-          # Use a local config to avoid potential issues with remote URL
-          echo "Using local Semgrep config"
+          # Disable metrics and use a local config for debugging
+          echo "Running Semgrep with disabled metrics and a local config"
           docker run --rm \
             -v $(pwd)/src:/src \
             returntocorp/semgrep:latest \
-            semgrep --config="p/ci" --output /src/semgrep_report.json || { echo "Semgrep scan failed"; exit 1; }
+            semgrep --config="p/ci" --metrics=off --output /src/semgrep_report.json || { echo "Semgrep scan failed"; exit 1; }
 
       # Combine Reports
       - name: Combine Reports
