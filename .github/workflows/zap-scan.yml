@@ -1,4 +1,4 @@
-name: ZAP Security Scan
+name: Full Stack Security Scan
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     - cron: "0 0 * * *"  # Daily scan at midnight UTC
 
 jobs:
-  zap-scan:
+  full-stack-security-scan:
     runs-on: ubuntu-latest
     services:
       juice-shop:
@@ -19,21 +19,67 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ZAP - Full Active Scan
       - name: Pull ZAP Docker Image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
 
-      - name: Run ZAP Baseline Scan
+      - name: Run ZAP Full Active Scan
         run: |
           docker run \
-            --network host \  # Allow communication between ZAP and Juice Shop
+            --network host \
             -v $(pwd):/zap/wrk/:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
+            zap-full-scan.py \
             -t http://localhost:3000 \
-            -r zap_report.html
+            -r zap_full_scan_report.html
 
+      # Trivy - Container Vulnerability Scan (using aquasec/trivy)
+      - name: Run Trivy Scan for Container Vulnerabilities
+        run: |
+          docker run --rm \
+            -v $(pwd):/results \
+            aquasec/trivy:latest \
+            --format html --output /results/trivy_report.html \
+            --no-progress \
+            --scan-repository bkimminich/juice-shop
+
+      # SQLMap - Automated SQL Injection Testing (via Docker)
+      - name: Run SQLMap Scan for SQL Injection Vulnerabilities (via Docker)
+        run: |
+          docker run --rm \
+            -v $(pwd):/results \
+            --entrypoint /bin/bash \
+            python:3.9-slim -c "pip install sqlmap && sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=3 --risk=3 --level=5 --output-dir=/results/sqlmap_report"
+
+      # Semgrep - Code Analysis for Vulnerabilities (via Docker)
+      - name: Run Semgrep Security Scan (via Docker)
+        run: |
+          docker run --rm \
+            -v $(pwd):/src \
+            returntocorp/semgrep:latest \
+            semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json
+
+      # Upload Reports
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v3
         with:
           name: zap-security-report
-          path: zap_report.html
+          path: zap_full_scan_report.html
+
+      - name: Upload Trivy Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-security-report
+          path: trivy_report.html
+
+      - name: Upload SQLMap Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlmap-security-report
+          path: sqlmap_report
+
+      - name: Upload Semgrep Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-security-report
+          path: semgrep_report.json
