@@ -91,7 +91,7 @@ jobs:
 
       # Run Nikto (Web Server Vulnerability Scanner)
       - name: Pull Nikto Docker Image (Cached)
-        run: docker pull --quiet sullo/nikto:latest
+        run: docker pull --quiet hysnsec/nikto:latest
 
       - name: Run Nikto Scan
         run: |
@@ -101,7 +101,7 @@ jobs:
             --network host \
             --user root \
             -v $(pwd)/results:/results \
-            sullo/nikto:latest \
+            hysnsec/nikto:latest \
             -h http://localhost:3000 -o /results/nikto_report/nikto_report.txt
 
           # Convert TXT to HTML
