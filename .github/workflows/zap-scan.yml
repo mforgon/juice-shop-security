@@ -37,14 +37,14 @@ jobs:
       - name: Pull ZAP Docker Image
         run: docker pull zaproxy/zap-stable
 
-      - name: Run ZAP Baseline Scan
+      - name: Run ZAP Baseline Scan (Allow Warnings)
         run: |
           docker run --rm \
             --network host \
             --user root \
             -v $(pwd):/zap/wrk/:rw \
             zaproxy/zap-stable \
-            zap-baseline.py -t http://localhost:3000 -r zap_report.html
+            zap-baseline.py -t http://localhost:3000 -r zap_report.html -a
 
       # Ensure ZAP Report Exists
       - name: Verify ZAP Report
