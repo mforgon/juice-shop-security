@@ -60,15 +60,17 @@ jobs:
 
       - name: Run Trivy Scan for Container Vulnerabilities
         run: |
+          mkdir -p results  # Ensure results directory exists
+
           docker run --rm \
-            -v $(pwd):/results \
+            -v $(pwd)/results:/results \
             aquasec/trivy:latest \
             image --format json --output /results/trivy_report.json bkimminich/juice-shop
 
           # Convert JSON to HTML
-          echo "<html><body><h1>Trivy Scan Report</h1><pre>" > /results/trivy_report.html
-          cat /results/trivy_report.json | jq '.' >> /results/trivy_report.html
-          echo "</pre></body></html>" >> /results/trivy_report.html
+          echo "<html><body><h1>Trivy Scan Report</h1><pre>" > results/trivy_report.html
+          cat results/trivy_report.json | jq '.' >> results/trivy_report.html
+          echo "</pre></body></html>" >> results/trivy_report.html
 
       # Pull & Run SQLMap Scan
       - name: Pull Python Docker Image (Cached)
@@ -76,10 +78,12 @@ jobs:
 
       - name: Run SQLMap Scan
         run: |
+          mkdir -p results/sqlmap_report  # Ensure SQLMap report directory exists
+
           docker run --rm \
             --network host \
             --user root \
-            -v $(pwd):/results \
+            -v $(pwd)/results:/results \
             python:3.9-slim bash -c "
               pip install sqlmap &&
               sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=2 --risk=2 --level=3 --output-dir=/results/sqlmap_report
@@ -91,8 +95,10 @@ jobs:
 
       - name: Run Semgrep Security Scan
         run: |
+          mkdir -p src  # Ensure src directory exists
+
           docker run --rm \
-            -v $(pwd):/src \
+            -v $(pwd)/src:/src \
             returntocorp/semgrep:latest \
             semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json
 
@@ -109,11 +115,11 @@ jobs:
           cat results/trivy_report.html >> combined_report.html
 
           echo "<h2>SQLMap Report</h2><pre>" >> combined_report.html
-          cat results/sqlmap_report/* >> combined_report.html
+          cat results/sqlmap_report/* >> combined_report.html || echo "SQLMap report missing" >> combined_report.html
           echo "</pre>" >> combined_report.html
 
           echo "<h2>Semgrep Report</h2><pre>" >> combined_report.html
-          cat src/semgrep_report.json >> combined_report.html
+          cat src/semgrep_report.json >> combined_report.html || echo "Semgrep report missing" >> combined_report.html
           echo "</pre>" >> combined_report.html
 
           echo "</body></html>" >> combined_report.html
