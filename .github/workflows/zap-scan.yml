@@ -1,0 +1,39 @@
+name: ZAP Security Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 0 * * 1"  # Runs every Monday
+
+jobs:
+  zap-scan:
+    runs-on: ubuntu-latest
+    services:
+      juice-shop:
+        image: bkimminich/juice-shop
+        ports:
+          - 3000:3000
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull ZAP Docker Image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+
+      - name: Run ZAP Baseline Scan
+        run: |
+          docker run \
+            --network host \  # Allow communication between ZAP and Juice Shop
+            -v $(pwd):/zap/wrk/:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://localhost:3000 \
+            -r zap_report.html
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: zap-security-report
+          path: zap_report.html
