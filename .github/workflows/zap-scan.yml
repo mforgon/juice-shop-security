@@ -41,30 +41,33 @@ jobs:
         run: |
           docker run --rm \
             --network host \
+            --user root \
             -v $(pwd):/zap/wrk/:rw \
             zaproxy/zap-stable \
             zap-baseline.py -t http://localhost:3000 -r zap_report.html
+
       # Ensure ZAP Report Exists
       - name: Verify ZAP Report
         run: |
-          if [ ! -f zap_baseline_report.html ]; then
-            echo "❌ ZAP Baseline Report Not Found!"
+          if [ ! -f zap_report.html ]; then
+            echo "❌ ZAP Report Not Found!"
             exit 1
           fi
 
-      # Run Trivy (Fixing Output Issue)
+      # Run Trivy (Fixed Output Issue)
       - name: Run Trivy Scan for Container Vulnerabilities
         run: |
           docker run --rm \
             -v $(pwd):/results \
             aquasec/trivy:latest \
-            image --format html --output-file /results/trivy_report.html bkimminich/juice-shop
+            image --format html --output /results/trivy_report.html bkimminich/juice-shop
 
       # Run SQLMap Scan
       - name: Run SQLMap Scan
         run: |
           docker run --rm \
             --network host \
+            --user root \
             -v $(pwd):/results \
             python:3.9-slim bash -c "
               pip install sqlmap &&
@@ -86,17 +89,17 @@ jobs:
           echo "<h1>Full Stack Security Scan Report</h1>" >> combined_report.html
 
           echo "<h2>ZAP Baseline Report</h2>" >> combined_report.html
-          cat zap_baseline_report.html >> combined_report.html
+          cat zap_report.html >> combined_report.html
 
           echo "<h2>Trivy Report</h2>" >> combined_report.html
-          cat trivy_report.html >> combined_report.html
+          cat results/trivy_report.html >> combined_report.html
 
           echo "<h2>SQLMap Report</h2><pre>" >> combined_report.html
-          cat sqlmap_report/* >> combined_report.html
+          cat results/sqlmap_report/* >> combined_report.html
           echo "</pre>" >> combined_report.html
 
           echo "<h2>Semgrep Report</h2><pre>" >> combined_report.html
-          cat semgrep_report.json >> combined_report.html
+          cat src/semgrep_report.json >> combined_report.html
           echo "</pre>" >> combined_report.html
 
           echo "</body></html>" >> combined_report.html
