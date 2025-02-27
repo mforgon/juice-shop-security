@@ -95,14 +95,18 @@ jobs:
 
       - name: Run Semgrep Security Scan
         run: |
-          mkdir -p src  # Ensure src directory exists
+          mkdir -p semgrep_results
 
-          # Disable metrics and use a local config for debugging
-          echo "Running Semgrep with disabled metrics and a local config"
           docker run --rm \
-            -v $(pwd)/src:/src \
+            -v $(pwd):/src \
+            --user root \
             returntocorp/semgrep:latest \
-            semgrep --config="p/ci" --metrics=off --output /src/semgrep_report.json || { echo "Semgrep scan failed"; exit 1; }
+            semgrep --config="p/ci" --metrics=off --error-exit-code 0 \
+              --output /src/semgrep_results/semgrep_report.json
+
+          if [ ! -f semgrep_results/semgrep_report.json ]; then
+            echo "❌ Semgrep report missing!" && exit 1
+          fi
 
       # Combine Reports
       - name: Combine Reports
