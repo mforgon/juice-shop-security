@@ -89,24 +89,44 @@ jobs:
               sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=2 --risk=2 --level=3 --output-dir=/results/sqlmap_report
             "
 
-      # Pull & Run Semgrep Scan
-      - name: Pull Semgrep Docker Image (Cached)
-        run: docker pull --quiet returntocorp/semgrep:latest
+      # Run Nikto (Web Server Vulnerability Scanner)
+      - name: Pull Nikto Docker Image (Cached)
+        run: docker pull --quiet sullo/nikto:latest
 
-      - name: Run Semgrep Security Scan
+      - name: Run Nikto Scan
         run: |
-          mkdir -p semgrep_results
+          mkdir -p results/nikto_report
+
+          docker run --rm \
+            --network host \
+            --user root \
+            -v $(pwd)/results:/results \
+            sullo/nikto:latest \
+            -h http://localhost:3000 -o /results/nikto_report/nikto_report.txt
+
+          # Convert TXT to HTML
+          echo "<html><body><h1>Nikto Scan Report</h1><pre>" > results/nikto_report/nikto_report.html
+          cat results/nikto_report/nikto_report.txt >> results/nikto_report/nikto_report.html
+          echo "</pre></body></html>" >> results/nikto_report/nikto_report.html
+
+      # Run TruffleHog (Secrets Detection)
+      - name: Pull TruffleHog Docker Image (Cached)
+        run: docker pull --quiet trufflesecurity/trufflehog:latest
+
+      - name: Run TruffleHog Scan
+        run: |
+          mkdir -p results/trufflehog_report
 
           docker run --rm \
             -v $(pwd):/src \
             --user root \
-            returntocorp/semgrep:latest \
-            semgrep --config="p/ci" --metrics=off --error-exit-code 0 \
-              --output /src/semgrep_results/semgrep_report.json
+            trufflesecurity/trufflehog:latest \
+            github --repo=file:///src --json > results/trufflehog_report/trufflehog_report.json || true
 
-          if [ ! -f semgrep_results/semgrep_report.json ]; then
-            echo "❌ Semgrep report missing!" && exit 1
-          fi
+          # Convert JSON to HTML
+          echo "<html><body><h1>TruffleHog Scan Report</h1><pre>" > results/trufflehog_report/trufflehog_report.html
+          cat results/trufflehog_report/trufflehog_report.json | jq '.' >> results/trufflehog_report/trufflehog_report.html
+          echo "</pre></body></html>" >> results/trufflehog_report/trufflehog_report.html
 
       # Combine Reports
       - name: Combine Reports
@@ -124,9 +144,11 @@ jobs:
           cat results/sqlmap_report/* >> combined_report.html || echo "SQLMap report missing" >> combined_report.html
           echo "</pre>" >> combined_report.html
 
-          echo "<h2>Semgrep Report</h2><pre>" >> combined_report.html
-          cat src/semgrep_report.json >> combined_report.html || echo "Semgrep report missing" >> combined_report.html
-          echo "</pre>" >> combined_report.html
+          echo "<h2>Nikto Report</h2>" >> combined_report.html
+          cat results/nikto_report/nikto_report.html >> combined_report.html || echo "Nikto report missing" >> combined_report.html
+
+          echo "<h2>TruffleHog Report</h2>" >> combined_report.html
+          cat results/trufflehog_report/trufflehog_report.html >> combined_report.html || echo "TruffleHog report missing" >> combined_report.html
 
           echo "</body></html>" >> combined_report.html
 
