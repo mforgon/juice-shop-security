@@ -1,4 +1,4 @@
-name: Full Stack Security Scan with Combined Report (Fixed)
+name: Full Stack Security Scan with Baseline ZAP Scan
 
 on:
   push:
@@ -19,38 +19,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Wait for Juice Shop to Start
+      # Ensure Juice Shop is Up
       - name: Wait for Juice Shop to Start
         run: |
           for i in {1..30}; do
             if curl --output /dev/null --silent --head --fail http://localhost:3000; then
-              echo "Juice Shop is up!"
+              echo "✅ Juice Shop is running!"
               exit 0
             fi
-            echo "Waiting for Juice Shop..."
+            echo "⏳ Waiting for Juice Shop..."
             sleep 5
           done
-          echo "Juice Shop did not start in time."
+          echo "❌ Juice Shop did not start in time."
           exit 1
 
-      # ZAP Baseline Scan (with Debug)
-      - name: Run ZAP Baseline Scan (Faster)
+      # Install & Run ZAP Baseline Scan
+      - name: Pull ZAP Docker Image
+        run: docker pull zaproxy/zap-stable
+
+      - name: Run ZAP Baseline Scan
         run: |
           docker run --rm \
             --network host \
             -v $(pwd):/zap/wrk/:rw \
-            -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://localhost:3000 -r zap_report.html --debug || true
+            zaproxy/zap-stable zap-baseline-scan.py -t http://localhost:3000 -r zap_baseline_report.html --debug || true
 
-      # Ensure ZAP Report Exists (Fix Missing Report Issue)
+      # Ensure ZAP Report Exists
       - name: Verify ZAP Report
         run: |
-          if [ ! -f zap_report.html ]; then
-            echo "❌ ZAP Report Not Found!"
+          if [ ! -f zap_baseline_report.html ]; then
+            echo "❌ ZAP Baseline Report Not Found!"
             exit 1
           fi
 
-      # Trivy Scan (Fixing Output Issue)
+      # Run Trivy (Fixing Output Issue)
       - name: Run Trivy Scan for Container Vulnerabilities
         run: |
           docker run --rm \
@@ -58,7 +60,7 @@ jobs:
             aquasec/trivy:latest \
             image --format html --output-file /results/trivy_report.html bkimminich/juice-shop
 
-      # SQLMap Scan
+      # Run SQLMap Scan
       - name: Run SQLMap Scan
         run: |
           docker run --rm \
@@ -69,7 +71,7 @@ jobs:
               sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=2 --risk=2 --level=3 --output-dir=/results/sqlmap_report
             "
 
-      # Semgrep Scan
+      # Run Semgrep Scan
       - name: Run Semgrep Security Scan
         run: |
           docker run --rm \
@@ -83,8 +85,8 @@ jobs:
           echo "<html><head><title>Security Scan Report</title></head><body>" > combined_report.html
           echo "<h1>Full Stack Security Scan Report</h1>" >> combined_report.html
 
-          echo "<h2>ZAP Report</h2>" >> combined_report.html
-          cat zap_report.html >> combined_report.html
+          echo "<h2>ZAP Baseline Report</h2>" >> combined_report.html
+          cat zap_baseline_report.html >> combined_report.html
 
           echo "<h2>Trivy Report</h2>" >> combined_report.html
           cat trivy_report.html >> combined_report.html
