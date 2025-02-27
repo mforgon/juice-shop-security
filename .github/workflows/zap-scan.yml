@@ -1,3 +1,176 @@
+name: Full Stack Security Scan with Baseline ZAP Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 0 * * *"  # Daily scan at midnight UTC
+
+jobs:
+  full-stack-security-scan:
+    runs-on: ubuntu-latest
+    services:
+      juice-shop:
+        image: bkimminich/juice-shop
+        ports:
+          - 3000:3000
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Ensure Juice Shop is Up
+      - name: Wait for Juice Shop to Start
+        run: |
+          for i in {1..30}; do
+            if curl --output /dev/null --silent --head --fail http://localhost:3000; then
+              echo "✅ Juice Shop is running!"
+              exit 0
+            fi
+            echo "⏳ Waiting for Juice Shop..."
+            sleep 5
+          done
+          echo "❌ Juice Shop did not start in time."
+          exit 1
+
+      # Pull & Run ZAP Baseline Scan
+      - name: Pull ZAP Docker Image (Cached)
+        run: docker pull --quiet zaproxy/zap-stable
+
+      - name: Run ZAP Baseline Scan (Allow Warnings)
+        run: |
+          docker run --rm \
+            --network host \
+            --user root \
+            -v $(pwd):/zap/wrk/:rw \
+            zaproxy/zap-stable \
+            zap-baseline.py -t http://localhost:3000 -r zap_report.html --auto || true
+
+      # Format ZAP Report
+      - name: Format ZAP Report
+        run: |
+          echo "<html><head><title>ZAP Baseline Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > zap_report_formatted.html
+          echo "<h1>ZAP Baseline Report</h1>" >> zap_report_formatted.html
+          cat zap_report.html >> zap_report_formatted.html
+          echo "</body></html>" >> zap_report_formatted.html
+
+      # Pull & Run Trivy Scan
+      - name: Pull Trivy Docker Image (Cached)
+        run: docker pull --quiet aquasec/trivy:latest
+
+      - name: Run Trivy Scan for Container Vulnerabilities
+        run: |
+          mkdir -p results  # Ensure results directory exists
+
+          docker run --rm \
+            -v $(pwd)/results:/results \
+            aquasec/trivy:latest \
+            image --format json --output /results/trivy_report.json bkimminich/juice-shop
+
+      # Format Trivy Report
+      - name: Format Trivy Report
+        run: |
+          echo "<html><head><title>Trivy Scan Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > results/trivy_report.html
+          echo "<h1>Trivy Scan Report</h1>" >> results/trivy_report.html
+          echo "<table><tr><th>Vulnerability</th><th>Severity</th><th>Package</th><th>Version</th><th>Fixed Version</th></tr>" >> results/trivy_report.html
+          cat results/trivy_report.json | jq -r '.Results[]?.Vulnerabilities[]? | "<tr><td>\(.VulnerabilityID)</td><td>\(.Severity)</td><td>\(.PkgName)</td><td>\(.InstalledVersion)</td><td>\(.FixedVersion)</td></tr>"' >> results/trivy_report.html
+          echo "</table></body></html>" >> results/trivy_report.html
+
+      # Pull & Run SQLMap Scan
+      - name: Pull Python Docker Image (Cached)
+        run: docker pull --quiet python:3.9-slim
+
+      - name: Run SQLMap Scan
+        run: |
+          mkdir -p results/sqlmap_report  # Ensure SQLMap report directory exists
+
+          docker run --rm \
+            --network host \
+            --user root \
+            -v $(pwd)/results:/results \
+            python:3.9-slim bash -c "
+              pip install sqlmap &&
+              sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=2 --risk=2 --level=3 --output-dir=/results/sqlmap_report
+            "
+
+      # Format SQLMap Report
+      - name: Format SQLMap Report
+        run: |
+          echo "<html><head><title>SQLMap Scan Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > results/sqlmap_report/sqlmap_report.html
+          echo "<h1>SQLMap Scan Report</h1>" >> results/sqlmap_report/sqlmap_report.html
+          echo "<pre>" >> results/sqlmap_report/sqlmap_report.html
+          cat results/sqlmap_report/* >> results/sqlmap_report/sqlmap_report.html || echo "No SQL injection vulnerabilities found." >> results/sqlmap_report/sqlmap_report.html
+          echo "</pre></body></html>" >> results/sqlmap_report/sqlmap_report.html
+
+      # Run Nikto (Web Server Vulnerability Scanner)
+      - name: Pull Nikto Docker Image (Cached)
+        run: docker pull --quiet hysnsec/nikto:latest
+
+      - name: Run Nikto Scan
+        run: |
+          mkdir -p results/nikto_report
+
+          docker run --rm \
+            --network host \
+            --user root \
+            -v $(pwd)/results:/results \
+            hysnsec/nikto:latest \
+            -h http://localhost:3000 -o /results/nikto_report/nikto_report.txt
+
+      # Format Nikto Report
+      - name: Format Nikto Report
+        run: |
+          echo "<html><head><title>Nikto Scan Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > results/nikto_report/nikto_report.html
+          echo "<h1>Nikto Scan Report</h1>" >> results/nikto_report/nikto_report.html
+          echo "<pre>" >> results/nikto_report/nikto_report.html
+          cat results/nikto_report/nikto_report.txt >> results/nikto_report/nikto_report.html || echo "No vulnerabilities found." >> results/nikto_report/nikto_report.html
+          echo "</pre></body></html>" >> results/nikto_report/nikto_report.html
+
+      # Run TruffleHog (Secrets Detection)
+      - name: Pull TruffleHog Docker Image (Cached)
+        run: docker pull --quiet trufflesecurity/trufflehog:latest
+
+      - name: Run TruffleHog Scan
+        run: |
+          mkdir -p results/trufflehog_report
+
+          docker run --rm \
+            -v $(pwd):/src \
+            --user root \
+            trufflesecurity/trufflehog:latest \
+            filesystem /src --json > results/trufflehog_report/trufflehog_report.json || true
+
+      # Format TruffleHog Report
+      - name: Format TruffleHog Report
+        run: |
+          echo "<html><head><title>TruffleHog Scan Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > results/trufflehog_report/trufflehog_report.html
+          echo "<h1>TruffleHog Scan Report</h1>" >> results/trufflehog_report/trufflehog_report.html
+          echo "<table><tr><th>Secret Type</th><th>File</th><th>Line</th><th>Commit</th></tr>" >> results/trufflehog_report/trufflehog_report.html
+          cat results/trufflehog_report/trufflehog_report.json | jq -r '. | "<tr><td>\(.DetectorName)</td><td>\(.SourceMetadata.Data.Filesystem.file)</td><td>\(.SourceMetadata.Data.Filesystem.line)</td><td>\(.SourceMetadata.Data.Filesystem.commit)</td></tr>"' >> results/trufflehog_report/trufflehog_report.html
+          echo "</table></body></html>" >> results/trufflehog_report/trufflehog_report.html
+
+      # Combine Reports
+      - name: Combine Reports
+        run: |
+          echo "<html><head><title>Full Stack Security Scan Report</title><style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; } th { background-color: #f2f2f2; }</style></head><body>" > combined_report.html
+          echo "<h1>Full Stack Security Scan Report</h1>" >> combined_report.html
+
+          echo "<h2>ZAP Baseline Report</h2>" >> combined_report.html
+          cat zap_report_formatted.html >> combined_report.html
+
+          echo "<h2>Trivy Report</h2>" >> combined_report.html
+          cat results/trivy_report.html >> combined_report.html
+
+          echo "<h2>SQLMap Report</h2>" >> combined_report.html
+          cat results/sqlmap_report/sqlmap_report.html >> combined_report.html
+
+          echo "<h2>Nikto Report</h2>" >> combined_report.html
+          cat results/nikto_report/nikto_report.html >> combined_report.html
+
+          echo "<h2>TruffleHog Report</h2>" >> combined_report.html
+          cat results/trufflehog_report/trufflehog_report.html >> combined_report.html
+
+          echo "</body></html>" >> combined_report.html
       # Upload Reports
       - name: Upload All Reports
         uses: actions/upload-artifact@v4
