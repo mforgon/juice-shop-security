@@ -1,4 +1,4 @@
-name: Full Stack Security Scan with Combined Report (Optimized)
+name: Full Stack Security Scan with Combined Report (Fixed)
 
 on:
   push:
@@ -19,49 +19,47 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Wait for Juice Shop to start
-      - name: Wait for Server to Start
+      # Wait for Juice Shop to Start
+      - name: Wait for Juice Shop to Start
         run: |
           for i in {1..30}; do
             if curl --output /dev/null --silent --head --fail http://localhost:3000; then
-              echo "Server is up!"
+              echo "Juice Shop is up!"
               exit 0
             fi
-            echo "Waiting for server..."
+            echo "Waiting for Juice Shop..."
             sleep 5
           done
-          echo "Server did not start in time."
+          echo "Juice Shop did not start in time."
           exit 1
 
-      # Cache ZAP Docker Image to speed up scans
-      - name: Cache ZAP Docker Image
-        uses: actions/cache@v4
-        with:
-          path: /var/lib/docker
-          key: zap-docker-${{ runner.os }}
-          restore-keys: zap-docker-
-
-      # Run ZAP Baseline Scan (Faster than Full Scan)
+      # ZAP Baseline Scan (with Debug)
       - name: Run ZAP Baseline Scan (Faster)
         run: |
           docker run --rm \
             --network host \
             -v $(pwd):/zap/wrk/:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://localhost:3000 -r zap_report.html || true
+            zap-baseline.py -t http://localhost:3000 -r zap_report.html --debug || true
 
-      # Run Trivy Scan for Container Vulnerabilities
+      # Ensure ZAP Report Exists (Fix Missing Report Issue)
+      - name: Verify ZAP Report
+        run: |
+          if [ ! -f zap_report.html ]; then
+            echo "❌ ZAP Report Not Found!"
+            exit 1
+          fi
+
+      # Trivy Scan (Fixing Output Issue)
       - name: Run Trivy Scan for Container Vulnerabilities
         run: |
           docker run --rm \
             -v $(pwd):/results \
             aquasec/trivy:latest \
-            --format html --output /results/trivy_report.html \
-            --no-progress \
-            --scan-repository bkimminich/juice-shop
+            image --format html --output-file /results/trivy_report.html bkimminich/juice-shop
 
-      # Run SQLMap Scan for SQL Injection Vulnerabilities
-      - name: Run SQLMap Scan for SQL Injection
+      # SQLMap Scan
+      - name: Run SQLMap Scan
         run: |
           docker run --rm \
             --network host \
@@ -71,7 +69,7 @@ jobs:
               sqlmap -u 'http://localhost:3000/rest/user/login' --batch --crawl=2 --risk=2 --level=3 --output-dir=/results/sqlmap_report
             "
 
-      # Run Semgrep Security Scan (via Docker)
+      # Semgrep Scan
       - name: Run Semgrep Security Scan
         run: |
           docker run --rm \
@@ -79,30 +77,30 @@ jobs:
             returntocorp/semgrep:latest \
             semgrep --config="https://semgrep.dev/p/oss-security" --output /src/semgrep_report.json
 
-      # Combine all reports into one
-      - name: Combine Reports into One
+      # Combine Reports
+      - name: Combine Reports
         run: |
           echo "<html><head><title>Security Scan Report</title></head><body>" > combined_report.html
           echo "<h1>Full Stack Security Scan Report</h1>" >> combined_report.html
 
-          echo "<h2>ZAP Security Scan Report</h2>" >> combined_report.html
+          echo "<h2>ZAP Report</h2>" >> combined_report.html
           cat zap_report.html >> combined_report.html
 
-          echo "<h2>Trivy Container Scan Report</h2>" >> combined_report.html
+          echo "<h2>Trivy Report</h2>" >> combined_report.html
           cat trivy_report.html >> combined_report.html
 
-          echo "<h2>SQLMap Scan Report</h2><pre>" >> combined_report.html
+          echo "<h2>SQLMap Report</h2><pre>" >> combined_report.html
           cat sqlmap_report/* >> combined_report.html
           echo "</pre>" >> combined_report.html
 
-          echo "<h2>Semgrep Scan Report</h2><pre>" >> combined_report.html
+          echo "<h2>Semgrep Report</h2><pre>" >> combined_report.html
           cat semgrep_report.json >> combined_report.html
           echo "</pre>" >> combined_report.html
 
           echo "</body></html>" >> combined_report.html
 
-      # Upload Combined Report
-      - name: Upload Combined Report
+      # Upload Report
+      - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
           name: full-stack-security-report
