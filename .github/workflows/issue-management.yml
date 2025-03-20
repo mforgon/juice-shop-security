@@ -1,0 +1,343 @@
+name: Security Issue Management and Prioritization
+
+on:
+  schedule:
+    - cron: "0 1 * * *"  # Run daily at 1:00 UTC
+  workflow_dispatch:     # Allow manual triggering
+
+jobs:
+  manage-security-issues:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      # Set up issue management configuration
+      - name: Setup Issue Management Configuration
+        run: |
+          cat > .github/issue-management-config.json << 'EOF'
+          {
+            "stalled_days": 7,
+            "critical_stalled_days": 3,
+            "escalation_teams": {
+              "ZAP": "@web-security-team",
+              "container": "@devops-team",
+              "secrets": "@security-team",
+              "sql-injection": "@db-team",
+              "web-server": "@platform-team"
+            },
+            "auto_assign": true
+          }
+          EOF
+          
+      # Identify stalled issues
+      - name: Identify Stalled Issues
+        id: identify_stalled
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Load configuration values
+          CONFIG_FILE=".github/issue-management-config.json"
+          STALLED_DAYS=$(jq -r '.stalled_days' $CONFIG_FILE)
+          CRITICAL_STALLED_DAYS=$(jq -r '.critical_stalled_days' $CONFIG_FILE)
+          
+          # Calculate dates for stalled detection
+          STALLED_DATE=$(date -d "-${STALLED_DAYS} days" +"%Y-%m-%d")
+          CRITICAL_STALLED_DATE=$(date -d "-${CRITICAL_STALLED_DAYS} days" +"%Y-%m-%d")
+          
+          echo "Using stalled threshold: $STALLED_DAYS days ($STALLED_DATE)"
+          echo "Using critical stalled threshold: $CRITICAL_STALLED_DAYS days ($CRITICAL_STALLED_DATE)"
+          
+          # Get open security issues
+          mkdir -p .github/temp
+          gh issue list --label security --state open --json number,title,body,updatedAt,assignees,labels --limit 100 > .github/temp/open-issues.json
+          
+          # Find stalled issues (not updated in X days)
+          jq -r --arg date "$STALLED_DATE" '.[] | 
+            select(.updatedAt < $date and (.labels | map(.name) | contains(["CRITICAL"]) | not)) | 
+            {number, title, updatedAt, assignees: (.assignees | map(.login)), labels: (.labels | map(.name))}' .github/temp/open-issues.json > .github/temp/stalled-issues.json
+            
+          # Find critical stalled issues (not updated in Y days)
+          jq -r --arg date "$CRITICAL_STALLED_DATE" '.[] | 
+            select(.updatedAt < $date and (.labels | map(.name) | contains(["CRITICAL"]))) | 
+            {number, title, updatedAt, assignees: (.assignees | map(.login)), labels: (.labels | map(.name))}' .github/temp/open-issues.json > .github/temp/critical-stalled-issues.json
+            
+          # Count for outputs
+          STALLED_COUNT=$(jq -s 'length' .github/temp/stalled-issues.json)
+          CRITICAL_STALLED_COUNT=$(jq -s 'length' .github/temp/critical-stalled-issues.json)
+          
+          # Combine for processing
+          jq -s 'add' .github/temp/stalled-issues.json .github/temp/critical-stalled-issues.json > .github/temp/all-stalled-issues.json
+          ALL_STALLED_COUNT=$(jq -s 'length' .github/temp/all-stalled-issues.json)
+          
+          # Set outputs
+          echo "stalled_count=$STALLED_COUNT" >> $GITHUB_OUTPUT
+          echo "critical_stalled_count=$CRITICAL_STALLED_COUNT" >> $GITHUB_OUTPUT
+          echo "all_stalled_count=$ALL_STALLED_COUNT" >> $GITHUB_OUTPUT
+          
+      # Process stalled issues
+      - name: Process Stalled Issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STALLED_COUNT: ${{ steps.identify_stalled.outputs.stalled_count }}
+          CRITICAL_STALLED_COUNT: ${{ steps.identify_stalled.outputs.critical_stalled_count }}
+          ALL_STALLED_COUNT: ${{ steps.identify_stalled.outputs.all_stalled_count }}
+        run: |
+          CONFIG_FILE=".github/issue-management-config.json"
+          STALLED_DAYS=$(jq -r '.stalled_days' $CONFIG_FILE)
+          CRITICAL_STALLED_DAYS=$(jq -r '.critical_stalled_days' $CONFIG_FILE)
+          AUTO_ASSIGN=$(jq -r '.auto_assign' $CONFIG_FILE)
+          
+          if [ "$ALL_STALLED_COUNT" -gt 0 ]; then
+            echo "Processing $ALL_STALLED_COUNT stalled issues ($CRITICAL_STALLED_COUNT critical)"
+            
+            # Process each stalled issue
+            jq -c '.[]' .github/temp/all-stalled-issues.json | while read -r issue; do
+              ISSUE_NUMBER=$(echo $issue | jq -r '.number')
+              ISSUE_TITLE=$(echo $issue | jq -r '.title')
+              ISSUE_UPDATED=$(echo $issue | jq -r '.updatedAt')
+              CURRENT_ASSIGNEES=$(echo $issue | jq -r '.assignees | join(", ")')
+              LABELS=$(echo $issue | jq -r '.labels')
+              
+              # Determine severity and type
+              if echo "$LABELS" | jq -e 'contains(["CRITICAL"])' > /dev/null; then
+                SEVERITY="CRITICAL"
+                STALLED_TYPE="critical"
+                REMINDER_DAYS=$CRITICAL_STALLED_DAYS
+              else
+                SEVERITY=$(echo "$LABELS" | jq -r '. | map(select(. == "HIGH" or . == "MEDIUM" or . == "LOW" or . == "INFORMATIONAL")) | .[0] // "UNKNOWN"')
+                STALLED_TYPE="regular"
+                REMINDER_DAYS=$STALLED_DAYS
+              fi
+              
+              # Determine issue type for team assignment
+              ISSUE_TYPE=""
+              for TYPE in "ZAP" "container" "secrets" "sql-injection" "web-server"; do
+                if echo "$LABELS" | jq -e "contains([\"$TYPE\"])" > /dev/null; then
+                  ISSUE_TYPE=$TYPE
+                  break
+                fi
+              done
+              
+              # Add reminder comment
+              echo "Adding reminder to issue #$ISSUE_NUMBER: $ISSUE_TITLE (Severity: $SEVERITY, Type: $ISSUE_TYPE)"
+              
+              # Create reminder body
+              reminder_body="## Automated Reminder\nThis security issue has been stalled for $REMINDER_DAYS days with no updates.\n\n**Severity:** $SEVERITY\n**Last Updated:** $ISSUE_UPDATED\n**Current Assignees:** $CURRENT_ASSIGNEES\n\nPlease provide an update on the remediation status or blockers preventing progress."
+              
+              # Add different urgent note for critical issues
+              if [ "$STALLED_TYPE" = "critical" ]; then
+                reminder_body="$reminder_body\n\n⚠️ **This is a CRITICAL severity issue that requires immediate attention.** ⚠️"
+              fi
+              
+              # Add the comment to the issue
+              gh issue comment $ISSUE_NUMBER --body "$reminder_body"
+              
+              # Auto-assign to escalation team if configured
+              if [ "$AUTO_ASSIGN" = "true" ] && [ ! -z "$ISSUE_TYPE" ]; then
+                ESCALATION_TEAM=$(jq -r ".escalation_teams.\"$ISSUE_TYPE\" // \"\"" $CONFIG_FILE)
+                
+                if [ ! -z "$ESCALATION_TEAM" ]; then
+                  echo "Reassigning issue #$ISSUE_NUMBER to escalation team: $ESCALATION_TEAM"
+                  gh issue edit $ISSUE_NUMBER --add-assignee "$ESCALATION_TEAM"
+                  
+                  # Create reassignment comment
+                  reassign_comment="## Automated Reassignment\nThis issue has been reassigned to $ESCALATION_TEAM for review.\n\nPrevious assignees: $CURRENT_ASSIGNEES"
+                  
+                  gh issue comment $ISSUE_NUMBER --body "$reassign_comment"
+                fi
+              fi
+              
+              # Add urgent label to critical issues if not already present
+              if [ "$SEVERITY" = "CRITICAL" ]; then
+                if ! echo "$LABELS" | jq -e 'contains(["urgent"])' > /dev/null; then
+                  gh issue edit $ISSUE_NUMBER --add-label "urgent"
+                  echo "Added urgent label to critical issue #$ISSUE_NUMBER"
+                fi
+              fi
+            done
+          else
+            echo "No stalled issues found"
+          fi
+          
+      # Create stalled issues summary report
+      - name: Create Stalled Issues Summary
+        if: ${{ steps.identify_stalled.outputs.all_stalled_count > 0 }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STALLED_COUNT: ${{ steps.identify_stalled.outputs.stalled_count }}
+          CRITICAL_STALLED_COUNT: ${{ steps.identify_stalled.outputs.critical_stalled_count }}
+          ALL_STALLED_COUNT: ${{ steps.identify_stalled.outputs.all_stalled_count }}
+        run: |
+          # Create summary
+          cat > stalled-issues-summary.md << EOF
+          # Stalled Security Issues Summary
+          
+          Generated: $(date)
+          
+          ## Overview
+          
+          - Total stalled issues: $ALL_STALLED_COUNT
+          - Critical stalled issues: $CRITICAL_STALLED_COUNT
+          - Other stalled issues: $STALLED_COUNT
+          
+          ## Critical Stalled Issues
+          
+          $(jq -r '.[] | select(.labels | contains(["CRITICAL"])) | "- #\(.number) \(.title) - Last updated: \(.updatedAt)"' .github/temp/all-stalled-issues.json)
+          
+          ## Other Stalled Issues
+          
+          $(jq -r '.[] | select(.labels | contains(["CRITICAL"]) | not) | "- #\(.number) \(.title) - Last updated: \(.updatedAt)"' .github/temp/all-stalled-issues.json)
+          
+          *This summary is automatically generated daily and includes reminders for all stalled issues.*
+          EOF
+          
+          # Create a GitHub gist with the summary
+          gh gist create stalled-issues-summary.md || echo "Failed to create gist, continuing..."
+          
+  issue-prioritization:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      # Set up prioritization configuration
+      - name: Setup Prioritization Configuration
+        run: |
+          cat > .github/priority-config.json << 'EOF'
+          {
+            "priority_criteria": {
+              "p0": {
+                "severity": ["CRITICAL"],
+                "label": "priority:0"
+              },
+              "p1": {
+                "severity": ["HIGH"],
+                "label": "priority:1"
+              },
+              "p2": {
+                "severity": ["MEDIUM"],
+                "label": "priority:2"
+              },
+              "p3": {
+                "severity": ["LOW", "INFORMATIONAL"],
+                "label": "priority:3"
+              }
+            },
+            "aging_thresholds": {
+              "CRITICAL": 14,
+              "HIGH": 30,
+              "MEDIUM": 60,
+              "LOW": 90,
+              "INFORMATIONAL": 120
+            }
+          }
+          EOF
+          
+      # Prioritize existing issues
+      - name: Auto-Prioritize Security Issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONFIG_FILE=".github/priority-config.json"
+          
+          # Get all security issues without priority labels
+          mkdir -p .github/temp
+          gh issue list --label security --state open --json number,title,labels --limit 100 > .github/temp/all-security-issues.json
+          
+          # Filter issues without priority labels
+          jq -r '[.[] | select(.labels | map(.name) | 
+            (contains(["priority:0"]) or contains(["priority:1"]) or contains(["priority:2"]) or contains(["priority:3"])) | not)] |
+            .[] | {number, title, labels: (.labels | map(.name))}' .github/temp/all-security-issues.json > .github/temp/unprioritized-issues.json
+            
+          # Prioritize each issue
+          jq -c '.[]' .github/temp/unprioritized-issues.json | while read -r issue; do
+            ISSUE_NUMBER=$(echo $issue | jq -r '.number')
+            ISSUE_TITLE=$(echo $issue | jq -r '.title')
+            LABELS=$(echo $issue | jq -r '.labels')
+            
+            # Determine severity
+            SEVERITY=$(echo "$LABELS" | jq -r '. | map(select(. == "CRITICAL" or . == "HIGH" or . == "MEDIUM" or . == "LOW" or . == "INFORMATIONAL")) | .[0] // "MEDIUM"')
+            
+            # Determine priority based on severity
+            PRIORITY=""
+            PRIORITY_LEVEL=""
+            
+            if [ "$SEVERITY" = "CRITICAL" ]; then
+              PRIORITY=$(jq -r '.priority_criteria.p0.label' $CONFIG_FILE)
+              PRIORITY_LEVEL="P0"
+            elif [ "$SEVERITY" = "HIGH" ]; then
+              PRIORITY=$(jq -r '.priority_criteria.p1.label' $CONFIG_FILE)
+              PRIORITY_LEVEL="P1"
+            elif [ "$SEVERITY" = "MEDIUM" ]; then
+              PRIORITY=$(jq -r '.priority_criteria.p2.label' $CONFIG_FILE)
+              PRIORITY_LEVEL="P2"
+            else
+              PRIORITY=$(jq -r '.priority_criteria.p3.label' $CONFIG_FILE)
+              PRIORITY_LEVEL="P3"
+            fi
+            
+            # Add priority label
+            echo "Adding $PRIORITY to issue #$ISSUE_NUMBER: $ISSUE_TITLE"
+            gh issue edit $ISSUE_NUMBER --add-label "$PRIORITY"
+            
+            # Create priority comment
+            priority_comment="## Automated Priority Assignment\nThis issue has been assigned **$PRIORITY_LEVEL** priority based on its severity ($SEVERITY).\n\nPriority levels:\n- P0: Critical issues requiring immediate attention\n- P1: High severity issues that should be addressed within 7 days\n- P2: Medium severity issues that should be addressed within 14 days\n- P3: Low/Informational issues that should be addressed as resources permit\n\nThis prioritization helps the team focus on the most critical security issues first."
+            
+            gh issue comment $ISSUE_NUMBER --body "$priority_comment"
+          done
+          
+      # Schedule review for aging issues
+      - name: Schedule Review for Aging Issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONFIG_FILE=".github/priority-config.json"
+          
+          # Get current date
+          TODAY=$(date +"%Y-%m-%d")
+          
+          # Get all open security issues with creation date
+          gh issue list --label security --state open --json number,title,createdAt,labels --limit 100 > .github/temp/all-security-issues.json
+          
+          # Process each issue to check if it's aging based on severity
+          jq -c '.[]' .github/temp/all-security-issues.json | while read -r issue; do
+            ISSUE_NUMBER=$(echo $issue | jq -r '.number')
+            ISSUE_TITLE=$(echo $issue | jq -r '.title')
+            CREATED_AT=$(echo $issue | jq -r '.createdAt')
+            LABELS=$(echo $issue | jq -r '.labels | map(.name)')
+            
+            # Determine severity
+            SEVERITY=$(echo "$LABELS" | jq -r '. | map(select(. == "CRITICAL" or . == "HIGH" or . == "MEDIUM" or . == "LOW" or . == "INFORMATIONAL")) | .[0] // "MEDIUM"')
+            
+            # Get aging threshold for this severity
+            AGING_THRESHOLD=$(jq -r ".aging_thresholds.\"$SEVERITY\" // 60" $CONFIG_FILE)
+            
+            # Calculate age in days
+            CREATED_DATE=$(date -d "$CREATED_AT" +"%Y-%m-%d")
+            AGE_DAYS=$(( ($(date -d "$TODAY" +%s) - $(date -d "$CREATED_DATE" +%s)) / 86400 ))
+            
+            # Check if issue is aging
+            if [ $AGE_DAYS -gt $AGING_THRESHOLD ]; then
+              # Check if already has aging label
+              if ! echo "$LABELS" | jq -e 'contains(["needs-review"])' > /dev/null; then
+                echo "Issue #$ISSUE_NUMBER is aging ($AGE_DAYS days old, threshold: $AGING_THRESHOLD)"
+                
+                # Add needs-review label
+                gh issue edit $ISSUE_NUMBER --add-label "needs-review"
+                
+                # Create aging comment
+                aging_comment="## Security Issue Age Review\nThis security issue has been open for **$AGE_DAYS days**, which exceeds the threshold of $AGING_THRESHOLD days for $SEVERITY severity issues.\n\nPlease review this issue to determine:\n1. Is this still a valid security concern?\n2. Can this issue be closed or downgraded?\n3. Are there resource constraints preventing resolution?\n4. Should this be escalated or rescheduled?\n\n*This notification is automatically generated for aging security issues.*"
+                
+                gh issue comment $ISSUE_NUMBER --body "$aging_comment"
+              fi
+            fi
+          done 

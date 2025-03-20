@@ -1,4 +1,4 @@
-name: Full Stack Security Scan with Baseline ZAP Scan
+name: Full Stack Security Scan with Baseline ZAP Scan and Automated Issue Management
 
 on:
   push:
@@ -9,6 +9,9 @@ on:
 jobs:
   full-stack-security-scan:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
     services:
       juice-shop:
         image: bkimminich/juice-shop
@@ -44,7 +47,7 @@ jobs:
             --user root \
             -v $(pwd):/zap/wrk/:rw \
             zaproxy/zap-stable \
-            zap-baseline.py -t http://localhost:3000 -r zap_report.html --auto || true
+            zap-baseline.py -t http://localhost:3000 -r zap_report.html -J zap_report.json --auto || true
 
       # Format ZAP Report
       - name: Format ZAP Report
@@ -171,6 +174,7 @@ jobs:
           cat results/trufflehog_report/trufflehog_report.html >> combined_report.html
 
           echo "</body></html>" >> combined_report.html
+          
       # Upload Reports
       - name: Upload All Reports
         uses: actions/upload-artifact@v4
@@ -183,3 +187,258 @@ jobs:
             results/nikto_report/nikto_report.html
             results/trufflehog_report/trufflehog_report.html
             combined_report.html
+          
+      # Create security team configuration file
+      - name: Setup Security Team Configuration
+        run: |
+          cat > .github/security-team-config.json << 'EOF'
+          {
+            "teams": {
+              "web-security": ["@web-security-team", "@devops-team"],
+              "container-security": ["@devops-team", "@platform-team"],
+              "secrets-management": ["@security-team", "@devops-team"],
+              "sql-injection": ["@db-team", "@web-security-team"], 
+              "infrastructure-security": ["@devops-team", "@platform-team"]
+            },
+            "severity_deadlines": {
+              "CRITICAL": 3,
+              "HIGH": 7,
+              "MEDIUM": 14,
+              "LOW": 30,
+              "INFORMATIONAL": 60
+            },
+            "default_team": "@security-team",
+            "default_deadline": 30
+          }
+          EOF
+        
+      # Process ZAP Findings and Create Issues
+      - name: Process ZAP Findings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "zap_report.json" ]; then
+            echo "Processing ZAP findings..."
+            FINDINGS=$(jq -r '.site[0].alerts[]? | select(.riskcode >= "1")' zap_report.json)
+            
+            if [ ! -z "$FINDINGS" ]; then
+              echo "$FINDINGS" | jq -c '.' | while read -r finding; do
+                TITLE=$(echo $finding | jq -r '.name')
+                RISK=$(echo $finding | jq -r '.riskdesc' | cut -d' ' -f1)
+                DESC=$(echo $finding | jq -r '.desc')
+                SOLUTION=$(echo $finding | jq -r '.solution')
+                
+                # Map risk to severity
+                case "$RISK" in
+                  "High") SEVERITY="HIGH"; TEAM="web-security" ;;
+                  "Medium") SEVERITY="MEDIUM"; TEAM="web-security" ;;
+                  "Low") SEVERITY="LOW"; TEAM="web-security" ;;
+                  *) SEVERITY="INFORMATIONAL"; TEAM="web-security" ;;
+                esac
+                
+                # Get deadline from config
+                DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+                DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+                
+                # Get team assignment from config
+                ASSIGNEES=$(jq -r ".teams.\"$TEAM\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+                
+                # Create issue
+                issue_body="## Security Finding\n**Risk Level:** $RISK\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** Web Application Vulnerability\n\n**Description:**\n$DESC\n\n**Solution:**\n$SOLUTION\n\n**Affected Endpoints:**\n$(echo $finding | jq -r '.instances[]? | "- " + .uri')\n\n*This issue was automatically created by the security scanning workflow.*"
+                
+                gh issue create --title "[ZAP][$SEVERITY] $TITLE" \
+                  --body "$issue_body" \
+                  --label "security,$SEVERITY,ZAP" \
+                  --assignee "$ASSIGNEES"
+              done
+            else
+              echo "No ZAP findings to process."
+            fi
+          else
+            echo "ZAP JSON report not found."
+          fi
+          
+      # Process Trivy Findings
+      - name: Process Trivy Findings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "results/trivy_report.json" ]; then
+            echo "Processing Trivy findings..."
+            
+            # Group vulnerabilities by severity to reduce noise
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > trivy_filtered.json
+            
+            # Create an issue for each severity level
+            for SEVERITY in "CRITICAL" "HIGH" "MEDIUM"; do
+              COUNT=$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s 'length')
+              
+              if [ "$COUNT" -gt 0 ]; then
+                # Get deadline from config
+                DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+                DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+                
+                # Get team assignment from config
+                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+                
+                VULNS=$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s '[.[].VulnerabilityID] | join(", ")')
+                
+                # Create issue with all vulnerabilities of this severity
+                issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"')\n$([ "$COUNT" -gt 20 ] && echo "... and $(($COUNT - 20)) more")\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
+                
+                gh issue create --title "[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities" \
+                  --body "$issue_body" \
+                  --label "security,$SEVERITY,container" \
+                  --assignee "$ASSIGNEES"
+              fi
+            done
+          else
+            echo "Trivy JSON report not found."
+          fi
+          
+      # Process TruffleHog Findings
+      - name: Process TruffleHog Findings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "results/trufflehog_report/trufflehog_report.json" ]; then
+            echo "Processing TruffleHog findings..."
+            
+            # Count findings
+            COUNT=$(cat results/trufflehog_report/trufflehog_report.json | jq -s 'length')
+            
+            if [ "$COUNT" -gt 0 ]; then
+              # Secrets are always considered critical
+              SEVERITY="CRITICAL"
+              
+              # Get deadline from config
+              DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+              DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+              
+              # Get team assignment from config
+              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              
+              # Create issue
+              issue_body="## Secrets Detection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT potential secrets\n\n**Secrets Found:**\n$(cat results/trufflehog_report/trufflehog_report.json | jq -s '.[0:10] | .[] | "- **" + .DetectorName + "** found in " + .SourceMetadata.Data.Filesystem.file + " (line " + (.SourceMetadata.Data.Filesystem.line | tostring) + ")"')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Immediate Action Required:**\n1. Revoke these credentials immediately\n2. Rotate any compromised secrets\n3. Remove secrets from codebase and store in secure vault\n4. Implement proper secrets management\n\n*This issue was automatically created by the security scanning workflow.*"
+              
+              gh issue create --title "[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase" \
+                --body "$issue_body" \
+                --label "security,$SEVERITY,secrets" \
+                --assignee "$ASSIGNEES"
+            else
+              echo "No TruffleHog findings to process."
+            fi
+          else
+            echo "TruffleHog JSON report not found."
+          fi
+          
+      # Process SQLMap Findings
+      - name: Process SQLMap Findings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -d "results/sqlmap_report" ]; then
+            echo "Processing SQLMap findings..."
+            
+            # Check for injection points in the log files
+            FINDINGS=$(grep -l "Injection point" results/sqlmap_report/*.log 2>/dev/null || true)
+            
+            if [ ! -z "$FINDINGS" ]; then
+              # SQL injections are always high severity
+              SEVERITY="HIGH"
+              
+              # Get deadline from config
+              DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+              DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+              
+              # Get team assignment from config
+              ASSIGNEES=$(jq -r ".teams.\"sql-injection\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              
+              # Create issue
+              issue_body="## SQL Injection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** SQL Injection Vulnerability\n\n**Description:**\nSQLMap has detected potential SQL injection vulnerabilities in the application.\n\n**Affected Endpoints:**\n$(grep -h "testing:" results/sqlmap_report/*.log 2>/dev/null | grep -v "testing: " | sort | uniq | sed 's/^/- /')\n\n**Recommended Action:**\n1. Implement parameterized queries\n2. Add proper input validation\n3. Use an ORM with prepared statements\n4. Implement least privilege database accounts\n\n*This issue was automatically created by the security scanning workflow.*"
+              
+              gh issue create --title "[SQLMap][$SEVERITY] SQL Injection vulnerabilities detected" \
+                --body "$issue_body" \
+                --label "security,$SEVERITY,sql-injection" \
+                --assignee "$ASSIGNEES"
+            else
+              echo "No SQLMap findings to process."
+            fi
+          else
+            echo "SQLMap report directory not found."
+          fi
+          
+      # Process Nikto Findings
+      - name: Process Nikto Findings
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "results/nikto_report/nikto_report.txt" ]; then
+            echo "Processing Nikto findings..."
+            
+            # Count findings (non-informational)
+            COUNT=$(grep -c "+ " results/nikto_report/nikto_report.txt || echo "0")
+            
+            if [ "$COUNT" -gt 0 ]; then
+              # Most Nikto findings are medium
+              SEVERITY="MEDIUM"
+              
+              # Get deadline from config
+              DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+              DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+              
+              # Get team assignment from config
+              ASSIGNEES=$(jq -r ".teams.\"infrastructure-security\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              
+              # Create issue
+              issue_body="## Web Server Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT findings\n\n**Top Issues:**\n$(grep "+ " results/nikto_report/nikto_report.txt | head -10 | sed 's/^/- /')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Recommended Action:**\n1. Review and harden web server configuration\n2. Update server software to latest version\n3. Implement security headers\n4. Review and update TLS configuration\n\n*This issue was automatically created by the security scanning workflow.*"
+              
+              gh issue create --title "[Nikto][$SEVERITY] $COUNT web server vulnerabilities detected" \
+                --body "$issue_body" \
+                --label "security,$SEVERITY,web-server" \
+                --assignee "$ASSIGNEES"
+            else
+              echo "No Nikto findings to process."
+            fi
+          else
+            echo "Nikto report not found."
+          fi
+      
+      # Generate Security Dashboard
+      - name: Create Security Dashboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Creating security dashboard..."
+          
+          cat > security-dashboard.md << EOF
+          # Security Scan Dashboard
+          
+          Generated on: $(date)
+          
+          ## Summary
+          
+          | Scanner | Status | Critical | High | Medium | Low | Info |
+          |---------|--------|---------|------|--------|-----|------|
+          | ZAP     | $([ -f "zap_report.json" ] && echo "✅" || echo "❌") | $([ -f "zap_report.json" ] && jq -r '.site[0].alerts[]? | select(.riskcode == "3")' zap_report.json | jq -s 'length' || echo "0") | $([ -f "zap_report.json" ] && jq -r '.site[0].alerts[]? | select(.riskcode == "2")' zap_report.json | jq -s 'length' || echo "0") | $([ -f "zap_report.json" ] && jq -r '.site[0].alerts[]? | select(.riskcode == "1")' zap_report.json | jq -s 'length' || echo "0") | $([ -f "zap_report.json" ] && jq -r '.site[0].alerts[]? | select(.riskcode == "0")' zap_report.json | jq -s 'length' || echo "0") | $([ -f "zap_report.json" ] && jq -r '.site[0].alerts[]? | select(.riskcode == "-1")' zap_report.json | jq -s 'length' || echo "0") |
+          | Trivy   | $([ -f "results/trivy_report.json" ] && echo "✅" || echo "❌") | $([ -f "results/trivy_report.json" ] && jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")' results/trivy_report.json | jq -s 'length' || echo "0") | $([ -f "results/trivy_report.json" ] && jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")' results/trivy_report.json | jq -s 'length' || echo "0") | $([ -f "results/trivy_report.json" ] && jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")' results/trivy_report.json | jq -s 'length' || echo "0") | $([ -f "results/trivy_report.json" ] && jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")' results/trivy_report.json | jq -s 'length' || echo "0") | $([ -f "results/trivy_report.json" ] && jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "UNKNOWN")' results/trivy_report.json | jq -s 'length' || echo "0") |
+          | TruffleHog | $([ -f "results/trufflehog_report/trufflehog_report.json" ] && echo "✅" || echo "❌") | $([ -f "results/trufflehog_report/trufflehog_report.json" ] && cat results/trufflehog_report/trufflehog_report.json | jq -s 'length' || echo "0") | 0 | 0 | 0 | 0 |
+          | SQLMap  | $([ -d "results/sqlmap_report" ] && echo "✅" || echo "❌") | 0 | $(grep -l "Injection point" results/sqlmap_report/*.log 2>/dev/null | wc -l || echo "0") | 0 | 0 | 0 |
+          | Nikto   | $([ -f "results/nikto_report/nikto_report.txt" ] && echo "✅" || echo "❌") | 0 | 0 | $(grep -c "+ " results/nikto_report/nikto_report.txt || echo "0") | 0 | 0 |
+          
+          ## Recent Issues
+          
+          $(gh issue list --label security --state open --limit 10 --json number,title,createdAt,labels | jq -r '.[] | "- #" + (.number | tostring) + " " + .title + " (" + (.createdAt | fromdateiso8601 | strftime("%Y-%m-%d")) + ")"')
+          
+          ## Metrics
+          
+          - Open security issues: $(gh issue list --label security --state open --json number | jq -r 'length')
+          - Closed security issues: $(gh issue list --label security --state closed --json number | jq -r 'length')
+          - Critical issues: $(gh issue list --label security,CRITICAL --state open --json number | jq -r 'length')
+          - High issues: $(gh issue list --label security,HIGH --state open --json number | jq -r 'length')
+          - Medium issues: $(gh issue list --label security,MEDIUM --state open --json number | jq -r 'length')
+          - Low issues: $(gh issue list --label security,LOW --state open --json number | jq -r 'length')
+          
+          EOF
+          
+          gh gist create security-dashboard.md || echo "Failed to create gist, continuing..."

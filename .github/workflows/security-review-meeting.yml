@@ -1,0 +1,205 @@
+name: Weekly Security Review Meeting Preparation
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday at 6:00 UTC
+  workflow_dispatch:     # Allow manual triggering
+
+jobs:
+  prepare-security-review:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      # Pull latest security scan reports
+      - name: Download Latest Security Reports
+        uses: actions/download-artifact@v4
+        with:
+          name: full-stack-security-reports
+          path: security-reports
+        continue-on-error: true
+          
+      # Analyze Open Security Issues
+      - name: Analyze Security Issues
+        id: analyze_issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get current date for deadline calculations
+          TODAY=$(date +"%Y-%m-%d")
+          
+          # Create analysis directory
+          mkdir -p security-analysis
+          
+          # Get all open security issues
+          gh issue list --label security --state open --json number,title,body,createdAt,updatedAt,labels,assignees --limit 100 > security-analysis/open-issues.json
+          
+          # Extract and categorize by deadline and severity
+          echo "Analyzing security issues by deadline and severity..."
+          
+          # Extract issues that are past deadline
+          jq -r '.[] | select(.body | test("Deadline: ")) | 
+            (.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")) as $deadline |
+            select($deadline.deadline < "'"$TODAY"'") | 
+            {number, title, deadline: $deadline.deadline, severity: (.labels | map(select(.name | test("CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL"))) | .[0].name), assignees: (.assignees | map(.login) | join(", "))}' security-analysis/open-issues.json > security-analysis/past-deadline-issues.json
+            
+          # Extract issues approaching deadline (within next 7 days)
+          NEXT_WEEK=$(date -d "+7 days" +"%Y-%m-%d")
+          jq -r '.[] | select(.body | test("Deadline: ")) | 
+            (.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")) as $deadline |
+            select($deadline.deadline >= "'"$TODAY"'" and $deadline.deadline <= "'"$NEXT_WEEK"'") | 
+            {number, title, deadline: $deadline.deadline, severity: (.labels | map(select(.name | test("CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL"))) | .[0].name), assignees: (.assignees | map(.login) | join(", "))}' security-analysis/open-issues.json > security-analysis/approaching-deadline-issues.json
+            
+          # Count issues by severity
+          CRITICAL_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["CRITICAL"]))] | length' security-analysis/open-issues.json)
+          HIGH_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["HIGH"]))] | length' security-analysis/open-issues.json)
+          MEDIUM_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["MEDIUM"]))] | length' security-analysis/open-issues.json)
+          LOW_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["LOW"]))] | length' security-analysis/open-issues.json)
+          INFO_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["INFORMATIONAL"]))] | length' security-analysis/open-issues.json)
+          
+          # Count issues by category
+          ZAP_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["ZAP"]))] | length' security-analysis/open-issues.json)
+          CONTAINER_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["container"]))] | length' security-analysis/open-issues.json)
+          SECRETS_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["secrets"]))] | length' security-analysis/open-issues.json)
+          SQL_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["sql-injection"]))] | length' security-analysis/open-issues.json)
+          WEB_COUNT=$(jq -r '[.[] | select(.labels | map(.name) | contains(["web-server"]))] | length' security-analysis/open-issues.json)
+          
+          # Set outputs for next steps
+          echo "past_deadline_count=$(jq 'length' security-analysis/past-deadline-issues.json)" >> $GITHUB_OUTPUT
+          echo "approaching_deadline_count=$(jq 'length' security-analysis/approaching-deadline-issues.json)" >> $GITHUB_OUTPUT
+          echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+          echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          
+      # Generate Meeting Agenda
+      - name: Generate Meeting Agenda
+        env:
+          PAST_DEADLINE: ${{ steps.analyze_issues.outputs.past_deadline_count }}
+          APPROACHING_DEADLINE: ${{ steps.analyze_issues.outputs.approaching_deadline_count }}
+          CRITICAL_COUNT: ${{ steps.analyze_issues.outputs.critical_count }}
+          HIGH_COUNT: ${{ steps.analyze_issues.outputs.high_count }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create meeting agenda markdown
+          MEETING_DATE=$(date +"%Y-%m-%d")
+          
+          cat > security-meeting-agenda.md << EOF
+          # Security Review Meeting - $MEETING_DATE
+          
+          ## Metrics Overview
+          
+          - **Past Deadline Issues:** $PAST_DEADLINE
+          - **Approaching Deadline (Next 7 Days):** $APPROACHING_DEADLINE
+          - **Critical Security Issues:** $CRITICAL_COUNT
+          - **High Security Issues:** $HIGH_COUNT
+          
+          ## Urgent Items for Discussion
+          
+          ### Past Deadline Issues
+          
+          $(jq -r '.[] | "- [ ] #\(.number) **\(.title)** (Deadline: \(.deadline), Assigned: \(.assignees))"' security-analysis/past-deadline-issues.json)
+          
+          ### Critical Issues
+          
+          $(gh issue list --label security,CRITICAL --state open --limit 10 --json number,title,createdAt,assignees | jq -r '.[] | "- [ ] #\(.number) **\(.title)** (Created: \(.createdAt | fromdateiso8601 | strftime("%Y-%m-%d")), Assigned: \(.assignees | map(.login) | join(", ")))"')
+          
+          ## Approaching Deadlines
+          
+          $(jq -r '.[] | "- [ ] #\(.number) **\(.title)** (Deadline: \(.deadline), Assigned: \(.assignees))"' security-analysis/approaching-deadline-issues.json)
+          
+          ## Action Items from Last Meeting
+          
+          *Add previous action items manually*
+          
+          ## Topics for Discussion
+          
+          1. New vulnerabilities found this week
+          2. Remediation progress on existing issues
+          3. Resource allocation for critical items
+          4. Updates on security improvement projects
+          
+          ## Notes
+          
+          *Meeting notes will be added here*
+          
+          EOF
+          
+          # Create a GitHub gist for the agenda
+          gh gist create security-meeting-agenda.md || echo "Failed to create gist, continuing..."
+          
+      # Generate Team Performance Report
+      - name: Team Performance Report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract team performance metrics
+          echo "Generating team performance report..."
+          
+          # Create performance report
+          cat > security-team-performance.md << EOF
+          # Security Team Performance Report
+          
+          Generated: $(date +"%Y-%m-%d")
+          
+          ## Resolution Metrics
+          
+          - **Issues resolved last 7 days:** $(gh issue list --label security --state closed --search "closed:>$(date -d "-7 days" +"%Y-%m-%d")" --json number | jq 'length')
+          - **Issues resolved last 30 days:** $(gh issue list --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length')
+          - **Average days to resolve:** *Requires custom calculation*
+          
+          ## Team Assignments
+          
+          | Team | Open Issues | Past Deadline | Closed Last 30d |
+          |------|------------|---------------|-----------------|
+          | Web Security | $(gh issue list --assignee @web-security-team --label security --state open --json number | jq 'length') | $(gh issue list --assignee @web-security-team --label security --state open --json number,body | jq '[.[] | select(.body | test("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})") and ((.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")).deadline < "$(date +"%Y-%m-%d")")) ] | length') | $(gh issue list --assignee @web-security-team --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length') |
+          | DevOps | $(gh issue list --assignee @devops-team --label security --state open --json number | jq 'length') | $(gh issue list --assignee @devops-team --label security --state open --json number,body | jq '[.[] | select(.body | test("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})") and ((.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")).deadline < "$(date +"%Y-%m-%d")")) ] | length') | $(gh issue list --assignee @devops-team --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length') |
+          | Security | $(gh issue list --assignee @security-team --label security --state open --json number | jq 'length') | $(gh issue list --assignee @security-team --label security --state open --json number,body | jq '[.[] | select(.body | test("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})") and ((.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")).deadline < "$(date +"%Y-%m-%d")")) ] | length') | $(gh issue list --assignee @security-team --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length') |
+          | DB Team | $(gh issue list --assignee @db-team --label security --state open --json number | jq 'length') | $(gh issue list --assignee @db-team --label security --state open --json number,body | jq '[.[] | select(.body | test("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})") and ((.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")).deadline < "$(date +"%Y-%m-%d")")) ] | length') | $(gh issue list --assignee @db-team --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length') |
+          | Platform | $(gh issue list --assignee @platform-team --label security --state open --json number | jq 'length') | $(gh issue list --assignee @platform-team --label security --state open --json number,body | jq '[.[] | select(.body | test("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})") and ((.body | capture("Deadline: (?<deadline>[0-9]{4}-[0-9]{2}-[0-9]{2})")).deadline < "$(date +"%Y-%m-%d")")) ] | length') | $(gh issue list --assignee @platform-team --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json number | jq 'length') |
+          
+          ## Top Performers
+          
+          *Based on number of closed issues in last 30 days*
+          
+          $(gh issue list --label security --state closed --search "closed:>$(date -d "-30 days" +"%Y-%m-%d")" --json assignees | jq '[.[] | .assignees[] | .login] | group_by(.) | map({assignee: .[0], count: length}) | sort_by(.count) | reverse | .[0:5] | .[] | "- **" + .assignee + "**: " + (.count | tostring) + " issues"')
+          
+          EOF
+          
+          # Create a GitHub gist for the performance report
+          gh gist create security-team-performance.md || echo "Failed to create gist, continuing..."
+          
+      # Create Calendar Invites for Team Members with Past Deadline Issues
+      - name: Generate Calendar Reminders
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Only proceed if there are past deadline issues
+          if [ -f "security-analysis/past-deadline-issues.json" ] && [ $(jq 'length' security-analysis/past-deadline-issues.json) -gt 0 ]; then
+            echo "Generating follow-up tasks for past deadline issues..."
+            
+            # Create reminder issue
+            NEXT_MEETING=$(date -d "next Monday" +"%Y-%m-%d")
+            
+            ISSUE_BODY=$(cat << EOF
+          ## Past Deadline Security Items Requiring Immediate Attention
+          
+          The following security issues have passed their remediation deadlines and need immediate attention:
+          
+          $(jq -r '.[] | "### #\(.number) \(.title)\n**Severity:** \(.severity)\n**Deadline:** \(.deadline) *(PAST DUE)*\n**Assigned To:** \(.assignees)\n\nPlease provide an update on this issue before the next security review meeting on $NEXT_MEETING.\n\n---\n"' security-analysis/past-deadline-issues.json)
+          
+          @security-team Please ensure these items are addressed before the next security review meeting.
+          
+          *This is an automated reminder created by the security review workflow.*
+          EOF
+            )
+            
+            gh issue create --title "Security Follow-Up: Past Deadline Items ($NEXT_MEETING)" \
+              --body "$ISSUE_BODY" \
+              --label "security,follow-up,urgent" \
+              --assignee "@security-team" \
+              --milestone "Security Review Meeting"
+          fi 
