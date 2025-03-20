@@ -132,5 +132,3 @@ Edit the team mappings in `.github/security-team-config.json`:
 Contributions to improve the security automation framework are welcome. Please submit PRs with proposed changes.
 
 ## License
-
-[Include your license information here] 
