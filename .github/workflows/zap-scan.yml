@@ -303,55 +303,109 @@ jobs:
           mkdir -p .github
           if [ ! -f ".github/security-team-config.json" ]; then
             echo "Security team config not found. Creating default config..."
-            echo '{
-              "teams": {
-                "web-security": ["'"$GITHUB_ACTOR"'"],
-                "container-security": ["'"$GITHUB_ACTOR"'"],
-                "secrets-management": ["'"$GITHUB_ACTOR"'"],
-                "sql-injection": ["'"$GITHUB_ACTOR"'"],
-                "infrastructure-security": ["'"$GITHUB_ACTOR"'"]
-              },
-              "severity_deadlines": {
-                "CRITICAL": 3,
-                "HIGH": 7,
-                "MEDIUM": 14,
-                "LOW": 30,
-                "INFORMATIONAL": 60
-              },
-              "default_team": ["'"$GITHUB_ACTOR"'"],
-              "default_deadline": 30
-            }' > .github/security-team-config.json
+            {
+              echo '{'
+              echo '  "teams": {'
+              echo '    "web-security": ["'"$GITHUB_ACTOR"'"],'
+              echo '    "container-security": ["'"$GITHUB_ACTOR"'"],'
+              echo '    "secrets-management": ["'"$GITHUB_ACTOR"'"],'
+              echo '    "sql-injection": ["'"$GITHUB_ACTOR"'"],'
+              echo '    "infrastructure-security": ["'"$GITHUB_ACTOR"'"]'
+              echo '  },'
+              echo '  "severity_deadlines": {'
+              echo '    "CRITICAL": 3,'
+              echo '    "HIGH": 7,'
+              echo '    "MEDIUM": 14,'
+              echo '    "LOW": 30,'
+              echo '    "INFORMATIONAL": 60'
+              echo '  },'
+              echo '  "default_team": ["'"$GITHUB_ACTOR"'"],'
+              echo '  "default_deadline": 30'
+              echo '}'
+            } > .github/security-team-config.json
           fi
 
           if [ -f "results/trivy_report.json" ]; then
             echo "Processing Trivy findings..."
             mkdir -p results/filtered
-            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > results/filtered/trivy_filtered.json || echo "[]" > results/filtered/trivy_filtered.json
+            
+            # Validate Trivy report JSON
+            if ! jq empty results/trivy_report.json 2>/dev/null; then
+              echo "Error: Invalid JSON in Trivy report"
+              exit 1
+            fi
+            
+            # Extract vulnerabilities with error handling
+            if ! jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > results/filtered/trivy_filtered.json; then
+              echo "[]" > results/filtered/trivy_filtered.json
+            fi
+            
+            # Validate filtered JSON
+            if ! jq empty results/filtered/trivy_filtered.json 2>/dev/null; then
+              echo "Error: Invalid JSON in filtered results"
+              exit 1
+            fi
             
             for SEVERITY in "CRITICAL" "HIGH" "MEDIUM"; do
-              COUNT=$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s 'length')
+              echo "Processing $SEVERITY vulnerabilities..."
+              
+              # Count vulnerabilities with error handling
+              COUNT=$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s 'length' || echo "0")
               
               if [ "$COUNT" -gt 0 ]; then
                 echo "Found $COUNT $SEVERITY vulnerabilities"
-                DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
-                DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
-                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team | .[]" .github/security-team-config.json)
                 
+                # Get configuration values with defaults
+                DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // 30" .github/security-team-config.json)
+                DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
+                
+                # Get team members with error handling
+                TEAM_MEMBERS=$(jq -r ".teams.\"container-security\" // .default_team | if type == \"array\" then .[] else empty end" .github/security-team-config.json)
+                
+                if [ -z "$TEAM_MEMBERS" ]; then
+                  echo "Warning: No team members found, using GITHUB_ACTOR"
+                  TEAM_MEMBERS="$GITHUB_ACTOR"
+                fi
+                
+                # Build assignee flags
                 ASSIGNEE_FLAGS=""
-                for ASSIGNEE in $ASSIGNEES; do
+                for ASSIGNEE in $TEAM_MEMBERS; do
                   ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
                 done
                 
-                issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"')\n$([ "$COUNT" -gt 20 ] && echo "... and $(($COUNT - 20)) more")\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
+                # Create issue body with error handling
+                VULNS=$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"' || echo "Error extracting vulnerability details")
                 
-                gh issue create --title "[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities" \
+                if [ "$VULNS" = "Error extracting vulnerability details" ]; then
+                  echo "Error: Failed to extract vulnerability details"
+                  continue
+                fi
+                
+                EXTRA_COUNT=$((COUNT - 20))
+                EXTRA_MSG=""
+                if [ "$COUNT" -gt 20 ]; then
+                  EXTRA_MSG="\n\n... and $EXTRA_COUNT more vulnerabilities"
+                fi
+                
+                issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$VULNS$EXTRA_MSG\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
+                
+                echo "Creating GitHub issue for $SEVERITY vulnerabilities..."
+                if ! gh issue create \
+                  --title "[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities" \
                   --body "$issue_body" \
                   --label "security,$SEVERITY,container" \
-                  $ASSIGNEE_FLAGS || echo "Failed to create issue for $SEVERITY vulnerabilities"
+                  $ASSIGNEE_FLAGS; then
+                  echo "Failed to create issue for $SEVERITY vulnerabilities"
+                  continue
+                fi
+                
+                echo "Successfully created issue for $SEVERITY vulnerabilities"
+              else
+                echo "No $SEVERITY vulnerabilities found"
               fi
             done
           else
-            echo "Trivy JSON report not found."
+            echo "Trivy JSON report not found at results/trivy_report.json"
           fi
           
       # Process TruffleHog Findings
