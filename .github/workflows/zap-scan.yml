@@ -416,40 +416,89 @@ jobs:
           if [ -f "results/trufflehog_report/trufflehog_report.json" ]; then
             echo "Processing TruffleHog findings..."
             
-            # Ensure valid JSON and count findings
+            # Validate JSON file
+            if ! jq empty results/trufflehog_report/trufflehog_report.json 2>/dev/null; then
+              echo "Error: Invalid JSON in TruffleHog report"
+              exit 1
+            fi
+            
+            # Count findings with error handling
             COUNT=$(cat results/trufflehog_report/trufflehog_report.json | jq -s '. | length' || echo "0")
+            echo "Found $COUNT potential secrets"
             
             if [ "$COUNT" -gt 0 ]; then
-              echo "Found $COUNT potential secrets"
-              
               # Secrets are always considered critical
               SEVERITY="CRITICAL"
               
-              # Get deadline from config
-              DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
+              # Ensure config file exists
+              if [ ! -f ".github/security-team-config.json" ]; then
+                echo "Creating default security team config..."
+                mkdir -p .github
+                {
+                  echo '{'
+                  echo '  "teams": {'
+                  echo '    "secrets-management": ["'"$GITHUB_ACTOR"'"]'
+                  echo '  },'
+                  echo '  "severity_deadlines": {'
+                  echo '    "CRITICAL": 3'
+                  echo '  },'
+                  echo '  "default_team": ["'"$GITHUB_ACTOR"'"],'
+                  echo '  "default_deadline": 3'
+                  echo '}'
+                } > .github/security-team-config.json
+              fi
+              
+              # Get deadline from config with error handling
+              DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // 3" .github/security-team-config.json)
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
-              # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team | .[]" .github/security-team-config.json)
+              # Get team assignment from config with error handling
+              TEAM_MEMBERS=$(jq -r ".teams.\"secrets-management\" // .default_team | if type == \"array\" then .[] else empty end" .github/security-team-config.json)
               
-              # Create assignee flags for each team member
+              if [ -z "$TEAM_MEMBERS" ]; then
+                echo "Warning: No team members found, using GITHUB_ACTOR"
+                TEAM_MEMBERS="$GITHUB_ACTOR"
+              fi
+              
+              # Build assignee flags
               ASSIGNEE_FLAGS=""
-              for ASSIGNEE in $ASSIGNEES; do
+              for ASSIGNEE in $TEAM_MEMBERS; do
                 ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
               done
               
-              # Create issue
-              issue_body="## Secrets Detection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT potential secrets\n\n**Secrets Found:**\n$(cat results/trufflehog_report/trufflehog_report.json | jq -s '.[0:10] | .[] | "- **" + .DetectorName + "** found in " + .SourceMetadata.Data.Filesystem.file + " (line " + (.SourceMetadata.Data.Filesystem.line | tostring) + ")"')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Immediate Action Required:**\n1. Revoke these credentials immediately\n2. Rotate any compromised secrets\n3. Remove secrets from codebase and store in secure vault\n4. Implement proper secrets management\n\n*This issue was automatically created by the security scanning workflow.*"
+              # Extract secrets with error handling
+              SECRETS=$(cat results/trufflehog_report/trufflehog_report.json | jq -s '.[0:10] | .[] | "- **" + .DetectorName + "** found in " + .SourceMetadata.Data.Filesystem.file + " (line " + (.SourceMetadata.Data.Filesystem.line | tostring) + ")"' || echo "Error extracting secret details")
               
-              gh issue create --title "[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase" \
+              if [ "$SECRETS" = "Error extracting secret details" ]; then
+                echo "Error: Failed to extract secret details"
+                exit 1
+              fi
+              
+              # Create extra message if needed
+              EXTRA_MSG=""
+              if [ "$COUNT" -gt 10 ]; then
+                EXTRA_MSG="\n\n... and $(($COUNT - 10)) more secrets found"
+              fi
+              
+              # Create issue body
+              issue_body="## Secrets Detection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT potential secrets\n\n**Secrets Found:**\n$SECRETS$EXTRA_MSG\n\n**Immediate Action Required:**\n1. Revoke these credentials immediately\n2. Rotate any compromised secrets\n3. Remove secrets from codebase and store in secure vault\n4. Implement proper secrets management\n\n*This issue was automatically created by the security scanning workflow.*"
+              
+              echo "Creating GitHub issue for secrets findings..."
+              if ! gh issue create \
+                --title "[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase" \
                 --body "$issue_body" \
                 --label "security,$SEVERITY,secrets" \
-                $ASSIGNEE_FLAGS || echo "Failed to create issue for secrets findings"
+                $ASSIGNEE_FLAGS; then
+                echo "Failed to create issue for secrets findings"
+                exit 1
+              fi
+              
+              echo "Successfully created issue for secrets findings"
             else
-              echo "No TruffleHog findings to process."
+              echo "No secrets found to process"
             fi
           else
-            echo "TruffleHog JSON report not found."
+            echo "TruffleHog JSON report not found at results/trufflehog_report/trufflehog_report.json"
           fi
           
       # Process SQLMap Findings
