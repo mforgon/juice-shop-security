@@ -299,23 +299,55 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Ensure config file exists
+          mkdir -p .github
+          if [ ! -f ".github/security-team-config.json" ]; then
+            echo "Security team config not found. Creating default config..."
+            cat > .github/security-team-config.json << EOF
+            {
+              "teams": {
+                "web-security": ["${{ github.actor }}"],
+                "container-security": ["${{ github.actor }}"],
+                "secrets-management": ["${{ github.actor }}"],
+                "sql-injection": ["${{ github.actor }}"],
+                "infrastructure-security": ["${{ github.actor }}"]
+              },
+              "severity_deadlines": {
+                "CRITICAL": 3,
+                "HIGH": 7,
+                "MEDIUM": 14,
+                "LOW": 30,
+                "INFORMATIONAL": 60
+              },
+              "default_team": ["${{ github.actor }}"],
+              "default_deadline": 30
+            }
+            EOF
+          fi
+
           if [ -f "results/trivy_report.json" ]; then
             echo "Processing Trivy findings..."
             
+            # Create filtered results directory
+            mkdir -p results/filtered
+            
             # Group vulnerabilities by severity to reduce noise
-            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > trivy_filtered.json
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > results/filtered/trivy_filtered.json || echo "[]" > results/filtered/trivy_filtered.json
             
             # Create an issue for each severity level
             for SEVERITY in "CRITICAL" "HIGH" "MEDIUM"; do
-              COUNT=$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s 'length')
+              # Count vulnerabilities of this severity
+              COUNT=$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s 'length')
               
               if [ "$COUNT" -gt 0 ]; then
+                echo "Found $COUNT $SEVERITY vulnerabilities"
+                
                 # Get deadline from config
                 DEADLINE_DAYS=$(jq -r ".severity_deadlines.\"$SEVERITY\" // .default_deadline" .github/security-team-config.json)
                 DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
                 
                 # Get team assignment from config
-                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team" .github/security-team-config.json | jq -r '.[]')
+                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team | .[]" .github/security-team-config.json)
                 
                 # Create assignee flags for each team member
                 ASSIGNEE_FLAGS=""
@@ -323,15 +355,13 @@ jobs:
                   ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
                 done
                 
-                VULNS=$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s '[.[].VulnerabilityID] | join(", ")')
-                
                 # Create issue with all vulnerabilities of this severity
-                issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"')\n$([ "$COUNT" -gt 20 ] && echo "... and $(($COUNT - 20)) more")\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
+                issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"')\n$([ "$COUNT" -gt 20 ] && echo "... and $(($COUNT - 20)) more")\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
                 
                 gh issue create --title "[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities" \
                   --body "$issue_body" \
                   --label "security,$SEVERITY,container" \
-                  $ASSIGNEE_FLAGS
+                  $ASSIGNEE_FLAGS || echo "Failed to create issue for $SEVERITY vulnerabilities"
               fi
             done
           else
@@ -346,10 +376,12 @@ jobs:
           if [ -f "results/trufflehog_report/trufflehog_report.json" ]; then
             echo "Processing TruffleHog findings..."
             
-            # Count findings
-            COUNT=$(cat results/trufflehog_report/trufflehog_report.json | jq -s 'length')
+            # Ensure valid JSON and count findings
+            COUNT=$(cat results/trufflehog_report/trufflehog_report.json | jq -s '. | length' || echo "0")
             
             if [ "$COUNT" -gt 0 ]; then
+              echo "Found $COUNT potential secrets"
+              
               # Secrets are always considered critical
               SEVERITY="CRITICAL"
               
@@ -358,7 +390,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team" .github/security-team-config.json | jq -r '.[]')
+              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team | .[]" .github/security-team-config.json)
               
               # Create assignee flags for each team member
               ASSIGNEE_FLAGS=""
@@ -372,7 +404,7 @@ jobs:
               gh issue create --title "[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase" \
                 --body "$issue_body" \
                 --label "security,$SEVERITY,secrets" \
-                $ASSIGNEE_FLAGS
+                $ASSIGNEE_FLAGS || echo "Failed to create issue for secrets findings"
             else
               echo "No TruffleHog findings to process."
             fi
@@ -389,9 +421,11 @@ jobs:
             echo "Processing SQLMap findings..."
             
             # Check for injection points in the log files
-            FINDINGS=$(grep -l "Injection point" results/sqlmap_report/*.log 2>/dev/null || true)
+            FINDINGS=$(find results/sqlmap_report -type f -name "*.log" -exec grep -l "Injection point" {} \; 2>/dev/null || true)
             
             if [ ! -z "$FINDINGS" ]; then
+              echo "Found SQL injection vulnerabilities"
+              
               # SQL injections are always high severity
               SEVERITY="HIGH"
               
@@ -400,7 +434,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"sql-injection\" // .default_team" .github/security-team-config.json | jq -r '.[]')
+              ASSIGNEES=$(jq -r ".teams.\"sql-injection\" // .default_team | .[]" .github/security-team-config.json)
               
               # Create assignee flags for each team member
               ASSIGNEE_FLAGS=""
@@ -409,12 +443,12 @@ jobs:
               done
               
               # Create issue
-              issue_body="## SQL Injection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** SQL Injection Vulnerability\n\n**Description:**\nSQLMap has detected potential SQL injection vulnerabilities in the application.\n\n**Affected Endpoints:**\n$(grep -h "testing:" results/sqlmap_report/*.log 2>/dev/null | grep -v "testing: " | sort | uniq | sed 's/^/- /')\n\n**Recommended Action:**\n1. Implement parameterized queries\n2. Add proper input validation\n3. Use an ORM with prepared statements\n4. Implement least privilege database accounts\n\n*This issue was automatically created by the security scanning workflow.*"
+              issue_body="## SQL Injection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** SQL Injection Vulnerability\n\n**Description:**\nSQLMap has detected potential SQL injection vulnerabilities in the application.\n\n**Affected Endpoints:**\n$(find results/sqlmap_report -type f -name "*.log" -exec grep -h "testing:" {} \; 2>/dev/null | grep -v "testing: " | sort -u | sed 's/^/- /')\n\n**Recommended Action:**\n1. Implement parameterized queries\n2. Add proper input validation\n3. Use an ORM with prepared statements\n4. Implement least privilege database accounts\n\n*This issue was automatically created by the security scanning workflow.*"
               
               gh issue create --title "[SQLMap][$SEVERITY] SQL Injection vulnerabilities detected" \
                 --body "$issue_body" \
                 --label "security,$SEVERITY,sql-injection" \
-                $ASSIGNEE_FLAGS
+                $ASSIGNEE_FLAGS || echo "Failed to create issue for SQL injection findings"
             else
               echo "No SQLMap findings to process."
             fi
@@ -434,6 +468,8 @@ jobs:
             COUNT=$(grep -c "+ " results/nikto_report/nikto_report.txt || echo "0")
             
             if [ "$COUNT" -gt 0 ]; then
+              echo "Found $COUNT web server vulnerabilities"
+              
               # Most Nikto findings are medium
               SEVERITY="MEDIUM"
               
@@ -442,7 +478,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"infrastructure-security\" // .default_team" .github/security-team-config.json | jq -r '.[]')
+              ASSIGNEES=$(jq -r ".teams.\"infrastructure-security\" // .default_team | .[]" .github/security-team-config.json)
               
               # Create assignee flags for each team member
               ASSIGNEE_FLAGS=""
@@ -456,7 +492,7 @@ jobs:
               gh issue create --title "[Nikto][$SEVERITY] $COUNT web server vulnerabilities detected" \
                 --body "$issue_body" \
                 --label "security,$SEVERITY,web-server" \
-                $ASSIGNEE_FLAGS
+                $ASSIGNEE_FLAGS || echo "Failed to create issue for web server findings"
             else
               echo "No Nikto findings to process."
             fi
