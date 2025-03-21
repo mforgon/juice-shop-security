@@ -22,6 +22,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Create required labels
+      - name: Create Required Labels
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Security severity labels
+          gh label create "security" --color "d93f0b" --description "Security-related issues" || true
+          gh label create "CRITICAL" --color "b60205" --description "Critical severity security issues" || true
+          gh label create "HIGH" --color "d93f0b" --description "High severity security issues" || true
+          gh label create "MEDIUM" --color "fbca04" --description "Medium severity security issues" || true
+          gh label create "LOW" --color "0e8a16" --description "Low severity security issues" || true
+          gh label create "INFORMATIONAL" --color "006b75" --description "Informational security issues" || true
+
+          # Finding type labels
+          gh label create "ZAP" --color "1d76db" --description "ZAP scanner findings" || true
+          gh label create "container" --color "5319e7" --description "Container security findings" || true
+          gh label create "secrets" --color "b60205" --description "Secrets detection findings" || true
+          gh label create "sql-injection" --color "d93f0b" --description "SQL injection findings" || true
+          gh label create "web-server" --color "fbca04" --description "Web server security findings" || true
+
+          # Priority labels
+          gh label create "priority:0" --color "b60205" --description "P0 - Critical priority" || true
+          gh label create "priority:1" --color "d93f0b" --description "P1 - High priority" || true
+          gh label create "priority:2" --color "fbca04" --description "P2 - Medium priority" || true
+          gh label create "priority:3" --color "0e8a16" --description "P3 - Low priority" || true
+
+          # Status labels
+          gh label create "needs-review" --color "d4c5f9" --description "Issue needs review" || true
+          gh label create "urgent" --color "b60205" --description "Urgent attention required" || true
+
       # Ensure Juice Shop is Up
       - name: Wait for Juice Shop to Start
         run: |
