@@ -19,16 +19,16 @@ jobs:
       # Set up issue management configuration
       - name: Setup Issue Management Configuration
         run: |
-          cat > .github/issue-management-config.json << 'EOF'
+          cat > .github/issue-management-config.json << EOF
           {
             "stalled_days": 7,
             "critical_stalled_days": 3,
             "escalation_teams": {
-              "ZAP": "web-security-team",
-              "container": "devops-team",
-              "secrets": "security-team",
-              "sql-injection": "db-team",
-              "web-server": "platform-team"
+              "ZAP": ["${{ github.actor }}"],
+              "container": ["${{ github.actor }}"],
+              "secrets": ["${{ github.actor }}"],
+              "sql-injection": ["${{ github.actor }}"],
+              "web-server": ["${{ github.actor }}"]
             },
             "auto_assign": true
           }
@@ -143,10 +143,14 @@ jobs:
                 
                 if [ ! -z "$ESCALATION_TEAM" ]; then
                   echo "Reassigning issue #$ISSUE_NUMBER to escalation team: $ESCALATION_TEAM"
-                  gh issue edit $ISSUE_NUMBER --add-assignee "$ESCALATION_TEAM"
+                  
+                  # Get team members from escalation team
+                  for TEAM_MEMBER in $(echo "$ESCALATION_TEAM" | jq -r '.[]'); do
+                    gh issue edit $ISSUE_NUMBER --add-assignee "$TEAM_MEMBER"
+                  done
                   
                   # Create reassignment comment
-                  reassign_comment="## Automated Reassignment\nThis issue has been reassigned to $ESCALATION_TEAM for review.\n\nPrevious assignees: $CURRENT_ASSIGNEES"
+                  reassign_comment="## Automated Reassignment\nThis issue has been reassigned to the escalation team for review.\n\nPrevious assignees: $CURRENT_ASSIGNEES"
                   
                   gh issue comment $ISSUE_NUMBER --body "$reassign_comment"
                 fi
