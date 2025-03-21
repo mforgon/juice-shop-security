@@ -19,20 +19,21 @@ jobs:
       # Set up issue management configuration
       - name: Setup Issue Management Configuration
         run: |
-          cat > .github/issue-management-config.json << EOF
+          mkdir -p .github
           {
-            "stalled_days": 7,
-            "critical_stalled_days": 3,
-            "escalation_teams": {
-              "ZAP": ["${{ github.actor }}"],
-              "container": ["${{ github.actor }}"],
-              "secrets": ["${{ github.actor }}"],
-              "sql-injection": ["${{ github.actor }}"],
-              "web-server": ["${{ github.actor }}"]
-            },
-            "auto_assign": true
-          }
-          EOF
+            echo '{'
+            echo '  "stalled_days": 7,'
+            echo '  "critical_stalled_days": 3,'
+            echo '  "escalation_teams": {'
+            echo '    "ZAP": ["'"$GITHUB_ACTOR"'"],'
+            echo '    "container": ["'"$GITHUB_ACTOR"'"],'
+            echo '    "secrets": ["'"$GITHUB_ACTOR"'"],'
+            echo '    "sql-injection": ["'"$GITHUB_ACTOR"'"],'
+            echo '    "web-server": ["'"$GITHUB_ACTOR"'"]'
+            echo '  },'
+            echo '  "auto_assign": true'
+            echo '}'
+          } > .github/issue-management-config.json
           
       # Identify stalled issues
       - name: Identify Stalled Issues
@@ -216,35 +217,36 @@ jobs:
       # Set up prioritization configuration
       - name: Setup Prioritization Configuration
         run: |
-          cat > .github/priority-config.json << 'EOF'
+          mkdir -p .github
           {
-            "priority_criteria": {
-              "p0": {
-                "severity": ["CRITICAL"],
-                "label": "priority:0"
-              },
-              "p1": {
-                "severity": ["HIGH"],
-                "label": "priority:1"
-              },
-              "p2": {
-                "severity": ["MEDIUM"],
-                "label": "priority:2"
-              },
-              "p3": {
-                "severity": ["LOW", "INFORMATIONAL"],
-                "label": "priority:3"
-              }
-            },
-            "aging_thresholds": {
-              "CRITICAL": 14,
-              "HIGH": 30,
-              "MEDIUM": 60,
-              "LOW": 90,
-              "INFORMATIONAL": 120
-            }
-          }
-          EOF
+            echo '{'
+            echo '  "priority_criteria": {'
+            echo '    "p0": {'
+            echo '      "severity": ["CRITICAL"],'
+            echo '      "label": "priority:0"'
+            echo '    },'
+            echo '    "p1": {'
+            echo '      "severity": ["HIGH"],'
+            echo '      "label": "priority:1"'
+            echo '    },'
+            echo '    "p2": {'
+            echo '      "severity": ["MEDIUM"],'
+            echo '      "label": "priority:2"'
+            echo '    },'
+            echo '    "p3": {'
+            echo '      "severity": ["LOW", "INFORMATIONAL"],'
+            echo '      "label": "priority:3"'
+            echo '    }'
+            echo '  },'
+            echo '  "aging_thresholds": {'
+            echo '    "CRITICAL": 14,'
+            echo '    "HIGH": 30,'
+            echo '    "MEDIUM": 60,'
+            echo '    "LOW": 90,'
+            echo '    "INFORMATIONAL": 120'
+            echo '  }'
+            echo '}'
+          } > .github/priority-config.json
           
       # Prioritize existing issues
       - name: Auto-Prioritize Security Issues
