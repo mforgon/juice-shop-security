@@ -194,11 +194,11 @@ jobs:
           cat > .github/security-team-config.json << 'EOF'
           {
             "teams": {
-              "web-security": ["@web-security-team", "@devops-team"],
-              "container-security": ["@devops-team", "@platform-team"],
-              "secrets-management": ["@security-team", "@devops-team"],
-              "sql-injection": ["@db-team", "@web-security-team"], 
-              "infrastructure-security": ["@devops-team", "@platform-team"]
+              "web-security": ["web-security-team", "devops-team"],
+              "container-security": ["devops-team", "platform-team"],
+              "secrets-management": ["security-team", "devops-team"],
+              "sql-injection": ["db-team", "web-security-team"], 
+              "infrastructure-security": ["devops-team", "platform-team"]
             },
             "severity_deadlines": {
               "CRITICAL": 3,
@@ -207,7 +207,7 @@ jobs:
               "LOW": 30,
               "INFORMATIONAL": 60
             },
-            "default_team": "@security-team",
+            "default_team": "security-team",
             "default_deadline": 30
           }
           EOF
@@ -241,7 +241,7 @@ jobs:
                 DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
                 
                 # Get team assignment from config
-                ASSIGNEES=$(jq -r ".teams.\"$TEAM\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+                ASSIGNEES=$(jq -r ".teams.\"$TEAM\" // .default_team" .github/security-team-config.json | jq -r 'join(" ")')
                 
                 # Create issue
                 issue_body="## Security Finding\n**Risk Level:** $RISK\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** Web Application Vulnerability\n\n**Description:**\n$DESC\n\n**Solution:**\n$SOLUTION\n\n**Affected Endpoints:**\n$(echo $finding | jq -r '.instances[]? | "- " + .uri')\n\n*This issue was automatically created by the security scanning workflow.*"
@@ -279,7 +279,7 @@ jobs:
                 DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
                 
                 # Get team assignment from config
-                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+                ASSIGNEES=$(jq -r ".teams.\"container-security\" // .default_team" .github/security-team-config.json | jq -r 'join(" ")')
                 
                 VULNS=$(jq -r "select(.Severity == \"$SEVERITY\")" trivy_filtered.json | jq -s '[.[].VulnerabilityID] | join(", ")')
                 
@@ -316,7 +316,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              ASSIGNEES=$(jq -r ".teams.\"secrets-management\" // .default_team" .github/security-team-config.json | jq -r 'join(" ")')
               
               # Create issue
               issue_body="## Secrets Detection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT potential secrets\n\n**Secrets Found:**\n$(cat results/trufflehog_report/trufflehog_report.json | jq -s '.[0:10] | .[] | "- **" + .DetectorName + "** found in " + .SourceMetadata.Data.Filesystem.file + " (line " + (.SourceMetadata.Data.Filesystem.line | tostring) + ")"')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Immediate Action Required:**\n1. Revoke these credentials immediately\n2. Rotate any compromised secrets\n3. Remove secrets from codebase and store in secure vault\n4. Implement proper secrets management\n\n*This issue was automatically created by the security scanning workflow.*"
@@ -352,7 +352,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"sql-injection\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              ASSIGNEES=$(jq -r ".teams.\"sql-injection\" // .default_team" .github/security-team-config.json | jq -r 'join(" ")')
               
               # Create issue
               issue_body="## SQL Injection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** SQL Injection Vulnerability\n\n**Description:**\nSQLMap has detected potential SQL injection vulnerabilities in the application.\n\n**Affected Endpoints:**\n$(grep -h "testing:" results/sqlmap_report/*.log 2>/dev/null | grep -v "testing: " | sort | uniq | sed 's/^/- /')\n\n**Recommended Action:**\n1. Implement parameterized queries\n2. Add proper input validation\n3. Use an ORM with prepared statements\n4. Implement least privilege database accounts\n\n*This issue was automatically created by the security scanning workflow.*"
@@ -388,7 +388,7 @@ jobs:
               DEADLINE_DATE=$(date -d "+$DEADLINE_DAYS days" +"%Y-%m-%d")
               
               # Get team assignment from config
-              ASSIGNEES=$(jq -r ".teams.\"infrastructure-security\" // .default_team" .github/security-team-config.json | jq -r 'join(", ")')
+              ASSIGNEES=$(jq -r ".teams.\"infrastructure-security\" // .default_team" .github/security-team-config.json | jq -r 'join(" ")')
               
               # Create issue
               issue_body="## Web Server Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT findings\n\n**Top Issues:**\n$(grep "+ " results/nikto_report/nikto_report.txt | head -10 | sed 's/^/- /')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Recommended Action:**\n1. Review and harden web server configuration\n2. Update server software to latest version\n3. Implement security headers\n4. Review and update TLS configuration\n\n*This issue was automatically created by the security scanning workflow.*"

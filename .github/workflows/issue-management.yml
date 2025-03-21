@@ -24,11 +24,11 @@ jobs:
             "stalled_days": 7,
             "critical_stalled_days": 3,
             "escalation_teams": {
-              "ZAP": "@web-security-team",
-              "container": "@devops-team",
-              "secrets": "@security-team",
-              "sql-injection": "@db-team",
-              "web-server": "@platform-team"
+              "ZAP": "web-security-team",
+              "container": "devops-team",
+              "secrets": "security-team",
+              "sql-injection": "db-team",
+              "web-server": "platform-team"
             },
             "auto_assign": true
           }
