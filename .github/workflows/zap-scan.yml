@@ -19,6 +19,32 @@ jobs:
           - 3000:3000
 
     steps:
+      # Helper function to check for duplicate issues
+      - name: Create Issue Deduplication Function
+        run: |
+          check_duplicate_issue() {
+            local title="$1"
+            local body="$2"
+            local labels="$3"
+            
+            # Search for open issues with the same title
+            existing_issues=$(gh issue list --state open --search "$title in:title" --json number,title,body,labels)
+            
+            # Check if any existing issue matches
+            if [ ! -z "$existing_issues" ]; then
+              echo "$existing_issues" | jq -c '.[]' | while read -r issue; do
+                issue_title=$(echo "$issue" | jq -r '.title')
+                if [ "$issue_title" = "$title" ]; then
+                  echo "Found duplicate issue: #$(echo "$issue" | jq -r '.number')"
+                  return 0  # Found duplicate
+                fi
+              done
+            fi
+            
+            return 1  # No duplicate found
+          }
+          export -f check_duplicate_issue
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -243,7 +269,7 @@ jobs:
             echo '}'
           } > .github/security-team-config.json
         
-      # Process ZAP Findings and Create Issues
+      # Process ZAP Findings
       - name: Process ZAP Findings
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -280,13 +306,20 @@ jobs:
                   ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
                 done
                 
-                # Create issue
+                # Create issue title and body
+                ISSUE_TITLE="[ZAP][$SEVERITY] $TITLE"
                 issue_body="## Security Finding\n**Risk Level:** $RISK\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** Web Application Vulnerability\n\n**Description:**\n$DESC\n\n**Solution:**\n$SOLUTION\n\n**Affected Endpoints:**\n$(echo $finding | jq -r '.instances[]? | "- " + .uri')\n\n*This issue was automatically created by the security scanning workflow.*"
                 
-                gh issue create --title "[ZAP][$SEVERITY] $TITLE" \
-                  --body "$issue_body" \
-                  --label "security,$SEVERITY,ZAP" \
-                  $ASSIGNEE_FLAGS
+                # Check for duplicate before creating
+                if ! check_duplicate_issue "$ISSUE_TITLE" "$issue_body" "security,$SEVERITY,ZAP"; then
+                  gh issue create --title "$ISSUE_TITLE" \
+                    --body "$issue_body" \
+                    --label "security,$SEVERITY,ZAP" \
+                    $ASSIGNEE_FLAGS
+                  echo "Created new issue: $ISSUE_TITLE"
+                else
+                  echo "Skipping duplicate issue: $ISSUE_TITLE"
+                fi
               done
             else
               echo "No ZAP findings to process."
@@ -327,24 +360,6 @@ jobs:
 
           if [ -f "results/trivy_report.json" ]; then
             echo "Processing Trivy findings..."
-            mkdir -p results/filtered
-            
-            # Validate Trivy report JSON
-            if ! jq empty results/trivy_report.json 2>/dev/null; then
-              echo "Error: Invalid JSON in Trivy report"
-              exit 1
-            fi
-            
-            # Extract vulnerabilities with error handling
-            if ! jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity | test("CRITICAL|HIGH|MEDIUM"))' results/trivy_report.json > results/filtered/trivy_filtered.json; then
-              echo "[]" > results/filtered/trivy_filtered.json
-            fi
-            
-            # Validate filtered JSON
-            if ! jq empty results/filtered/trivy_filtered.json 2>/dev/null; then
-              echo "Error: Invalid JSON in filtered results"
-              exit 1
-            fi
             
             for SEVERITY in "CRITICAL" "HIGH" "MEDIUM"; do
               echo "Processing $SEVERITY vulnerabilities..."
@@ -373,7 +388,8 @@ jobs:
                   ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
                 done
                 
-                # Create issue body with error handling
+                # Create issue title and body
+                ISSUE_TITLE="[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities"
                 VULNS=$(jq -r "select(.Severity == \"$SEVERITY\")" results/filtered/trivy_filtered.json | jq -s '.[0:20] | .[] | "- **" + .VulnerabilityID + "**: " + .Title + " (" + .PkgName + " " + .InstalledVersion + ")"' || echo "Error extracting vulnerability details")
                 
                 if [ "$VULNS" = "Error extracting vulnerability details" ]; then
@@ -389,17 +405,17 @@ jobs:
                 
                 issue_body="## Container Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT vulnerabilities\n\n**Vulnerabilities:**\n$VULNS$EXTRA_MSG\n\n**Recommended Action:**\nUpdate the affected packages to the fixed versions where available.\n\n*This issue was automatically created by the security scanning workflow.*"
                 
-                echo "Creating GitHub issue for $SEVERITY vulnerabilities..."
-                if ! gh issue create \
-                  --title "[Trivy][$SEVERITY] Container has $COUNT $SEVERITY vulnerabilities" \
-                  --body "$issue_body" \
-                  --label "security,$SEVERITY,container" \
-                  $ASSIGNEE_FLAGS; then
-                  echo "Failed to create issue for $SEVERITY vulnerabilities"
-                  continue
+                # Check for duplicate before creating
+                if ! check_duplicate_issue "$ISSUE_TITLE" "$issue_body" "security,$SEVERITY,container"; then
+                  gh issue create \
+                    --title "$ISSUE_TITLE" \
+                    --body "$issue_body" \
+                    --label "security,$SEVERITY,container" \
+                    $ASSIGNEE_FLAGS
+                  echo "Created new issue: $ISSUE_TITLE"
+                else
+                  echo "Skipping duplicate issue: $ISSUE_TITLE"
                 fi
-                
-                echo "Successfully created issue for $SEVERITY vulnerabilities"
               else
                 echo "No $SEVERITY vulnerabilities found"
               fi
@@ -480,20 +496,21 @@ jobs:
                 EXTRA_MSG="\n\n... and $(($COUNT - 10)) more secrets found"
               fi
               
-              # Create issue body
+              # Create issue title and body
+              ISSUE_TITLE="[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase"
               issue_body="## Secrets Detection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT potential secrets\n\n**Secrets Found:**\n$SECRETS$EXTRA_MSG\n\n**Immediate Action Required:**\n1. Revoke these credentials immediately\n2. Rotate any compromised secrets\n3. Remove secrets from codebase and store in secure vault\n4. Implement proper secrets management\n\n*This issue was automatically created by the security scanning workflow.*"
               
-              echo "Creating GitHub issue for secrets findings..."
-              if ! gh issue create \
-                --title "[TruffleHog][$SEVERITY] $COUNT potential secrets found in codebase" \
-                --body "$issue_body" \
-                --label "security,$SEVERITY,secrets" \
-                $ASSIGNEE_FLAGS; then
-                echo "Failed to create issue for secrets findings"
-                exit 1
+              # Check for duplicate before creating
+              if ! check_duplicate_issue "$ISSUE_TITLE" "$issue_body" "security,$SEVERITY,secrets"; then
+                gh issue create \
+                  --title "$ISSUE_TITLE" \
+                  --body "$issue_body" \
+                  --label "security,$SEVERITY,secrets" \
+                  $ASSIGNEE_FLAGS
+                echo "Created new issue: $ISSUE_TITLE"
+              else
+                echo "Skipping duplicate issue: $ISSUE_TITLE"
               fi
-              
-              echo "Successfully created issue for secrets findings"
             else
               echo "No secrets found to process"
             fi
@@ -531,13 +548,21 @@ jobs:
                 ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
               done
               
-              # Create issue
+              # Create issue title and body
+              ISSUE_TITLE="[SQLMap][$SEVERITY] SQL Injection vulnerabilities detected"
               issue_body="## SQL Injection Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Finding Type:** SQL Injection Vulnerability\n\n**Description:**\nSQLMap has detected potential SQL injection vulnerabilities in the application.\n\n**Affected Endpoints:**\n$(find results/sqlmap_report -type f -name "*.log" -exec grep -h "testing:" {} \; 2>/dev/null | grep -v "testing: " | sort -u | sed 's/^/- /')\n\n**Recommended Action:**\n1. Implement parameterized queries\n2. Add proper input validation\n3. Use an ORM with prepared statements\n4. Implement least privilege database accounts\n\n*This issue was automatically created by the security scanning workflow.*"
               
-              gh issue create --title "[SQLMap][$SEVERITY] SQL Injection vulnerabilities detected" \
-                --body "$issue_body" \
-                --label "security,$SEVERITY,sql-injection" \
-                $ASSIGNEE_FLAGS || echo "Failed to create issue for SQL injection findings"
+              # Check for duplicate before creating
+              if ! check_duplicate_issue "$ISSUE_TITLE" "$issue_body" "security,$SEVERITY,sql-injection"; then
+                gh issue create \
+                  --title "$ISSUE_TITLE" \
+                  --body "$issue_body" \
+                  --label "security,$SEVERITY,sql-injection" \
+                  $ASSIGNEE_FLAGS
+                echo "Created new issue: $ISSUE_TITLE"
+              else
+                echo "Skipping duplicate issue: $ISSUE_TITLE"
+              fi
             else
               echo "No SQLMap findings to process."
             fi
@@ -575,13 +600,21 @@ jobs:
                 ASSIGNEE_FLAGS="$ASSIGNEE_FLAGS --assignee $ASSIGNEE"
               done
               
-              # Create issue
+              # Create issue title and body
+              ISSUE_TITLE="[Nikto][$SEVERITY] $COUNT web server vulnerabilities detected"
               issue_body="## Web Server Security Finding\n**Severity:** $SEVERITY\n**Deadline:** $DEADLINE_DATE\n**Count:** $COUNT findings\n\n**Top Issues:**\n$(grep "+ " results/nikto_report/nikto_report.txt | head -10 | sed 's/^/- /')\n$([ "$COUNT" -gt 10 ] && echo "... and $(($COUNT - 10)) more")\n\n**Recommended Action:**\n1. Review and harden web server configuration\n2. Update server software to latest version\n3. Implement security headers\n4. Review and update TLS configuration\n\n*This issue was automatically created by the security scanning workflow.*"
               
-              gh issue create --title "[Nikto][$SEVERITY] $COUNT web server vulnerabilities detected" \
-                --body "$issue_body" \
-                --label "security,$SEVERITY,web-server" \
-                $ASSIGNEE_FLAGS || echo "Failed to create issue for web server findings"
+              # Check for duplicate before creating
+              if ! check_duplicate_issue "$ISSUE_TITLE" "$issue_body" "security,$SEVERITY,web-server"; then
+                gh issue create \
+                  --title "$ISSUE_TITLE" \
+                  --body "$issue_body" \
+                  --label "security,$SEVERITY,web-server" \
+                  $ASSIGNEE_FLAGS
+                echo "Created new issue: $ISSUE_TITLE"
+              else
+                echo "Skipping duplicate issue: $ISSUE_TITLE"
+              fi
             else
               echo "No Nikto findings to process."
             fi
