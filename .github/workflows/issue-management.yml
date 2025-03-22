@@ -261,8 +261,8 @@ jobs:
           
           # Filter issues without priority labels
           jq -r '[.[] | select(.labels | map(.name) | 
-            (contains(["priority:0"]) or contains(["priority:1"]) or contains(["priority:2"]) or contains(["priority:3"])) | not)] |
-            .[] | {number, title, labels: (.labels | map(.name))}' .github/temp/all-security-issues.json > .github/temp/unprioritized-issues.json
+            (contains(["priority:0"]) or contains(["priority:1"]) or contains(["priority:2"]) or contains(["priority:3"])) | not)] | 
+            .[] | {number: .number, title: .title, labels: (.labels | map(.name))}' .github/temp/all-security-issues.json > .github/temp/unprioritized-issues.json
             
           # Prioritize each issue
           jq -c '.[]' .github/temp/unprioritized-issues.json | while read -r issue; do
@@ -346,4 +346,4 @@ jobs:
                 gh issue comment $ISSUE_NUMBER --body "$aging_comment"
               fi
             fi
-          done 
+          done
